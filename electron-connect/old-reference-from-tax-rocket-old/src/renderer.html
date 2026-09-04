@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tax Rocket Portal Agent</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel hero">
+        <p class="eyebrow">Tax Rocket Desktop Agent</p>
+        <h1>Connect your official portal session</h1>
+        <p class="lede">
+          Sign in through the official portal on this trusted device. Once the app detects the
+          required ready screen, it will mark this desktop device ready automatically.
+        </p>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>How this works</h2>
+          <ol class="steps">
+            <li>We open the official sign-in window for the requested portal.</li>
+            <li>You complete sign-in locally on this device.</li>
+            <li>We detect the ready screen and mark this trusted device ready automatically.</li>
+          </ol>
+
+          <label class="field">
+            <span>Account reference</span>
+            <input id="accountReference" type="text" placeholder="Optional" />
+          </label>
+
+          <div class="actions">
+            <button id="openLoginButton" class="button button-secondary">Reopen Portal Login</button>
+          </div>
+
+          <p class="hint">
+            Dry-run jobs can continue automatically after the local sign-in is ready, but final
+            submit always stays human controlled.
+          </p>
+        </article>
+
+        <article class="panel">
+          <h2>Status</h2>
+          <div id="statusCard" class="status status-idle">
+            Waiting for a connection request from the web app.
+          </div>
+
+          <div class="meta">
+            <div>
+              <span class="meta-label">App URL</span>
+              <strong id="apiBaseUrl">Not connected</strong>
+            </div>
+            <div>
+              <span class="meta-label">Session token</span>
+              <strong id="tokenState">Not received</strong>
+            </div>
+          </div>
+
+          <p class="hint">
+            Start from the web app by clicking <strong>Open Desktop Agent</strong>. That binds this
+            connection securely to the correct filing context.
+          </p>
+        </article>
+      </section>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+  </html>

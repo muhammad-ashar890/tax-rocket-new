@@ -1,0 +1,41 @@
+{
+  "name": "taxrocket-portal-agent",
+  "version": "1.0.0",
+  "description": "TaxRocket Portal Agent - Trusted Desktop Agent for FBR IRIS filing",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron . --dev",
+    "start": "electron .",
+    "dist:win": "electron-builder --win",
+    "build": "electron-builder",
+    "desktop-connect:dev": "electron . --dev"
+  },
+  "author": "TaxRocket",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.taxrocket.portal-agent",
+    "productName": "Tax Rocket Portal Agent",
+    "protocols": [
+      {
+        "name": "TaxRocket Connect",
+        "schemes": ["taxrocket-connect"]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "directories": {
+      "output": "dist"
+    }
+  }
+}

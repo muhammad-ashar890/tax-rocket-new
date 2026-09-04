@@ -1,0 +1,387 @@
+/**
+ * FBR Agent Config - Merged from old tax-rocket-old + new IRIS codes
+ * 
+ * This file combines:
+ * - Old: Selector bundle for IRIS 2.0 (Angular) and Classic (PrimeFaces) DOM automation
+ * - New: IRIS field codes from IRIS_System_Field_Codes_Extracted.csv (536 codes)
+ * 
+ * Used by Electron agent to fill IRIS fields
+ */
+
+import { IRIS_CODES, CATEGORY_TO_IRIS_MAP, TAX_SECTION_TO_IRIS_CODE } from "./iris-field-codes";
+
+// Re-export IRIS codes for agent
+export { IRIS_CODES, CATEGORY_TO_IRIS_MAP, TAX_SECTION_TO_IRIS_CODE };
+
+// ─── IRIS Portal Type ───────────────────────────────────
+
+export type IrisPortalType = "iris2" | "irisv1" | "both";
+
+export type IrisRouteFamily =
+  | "simplified_salary_114i"
+  | "normal_individual_114"
+  | "normal_individual_114_revised"
+  | "classic_individual_114"
+  | "wealth_statement"
+  | "pre_step_application";
+
+export function getPortalTypeForRouteFamily(routeFamily: IrisRouteFamily): IrisPortalType {
+  switch (routeFamily) {
+    case "classic_individual_114":
+      return "irisv1";
+    case "simplified_salary_114i":
+    case "normal_individual_114":
+    case "normal_individual_114_revised":
+      return "iris2";
+    case "wealth_statement":
+    case "pre_step_application":
+      return "both";
+    default:
+      return "iris2";
+  }
+}
+
+export function isClassicPortalRoute(routeFamily: IrisRouteFamily): boolean {
+  return getPortalTypeForRouteFamily(routeFamily) === "irisv1";
+}
+
+// ─── Desktop Auth Config ───────────────────────────────────
+
+export type FbrDesktopAuthConfig = {
+  loginUrl: string;
+  readySelector: string;
+  readyRejectSelector: string | null;
+  readyUrlPattern: string | null;
+  useMockIris: boolean;
+};
+
+export function getFbrDesktopAuthConfig(): FbrDesktopAuthConfig {
+  const useMockIris = (process.env.FBR_USE_MOCK_IRIS?.trim() || "true").toLowerCase() !== "false";
+  const loginUrl = process.env.FBR_IRIS_LOGIN_URL?.trim() || "mock-iris://login";
+
+  return {
+    loginUrl,
+    readySelector: process.env.FBR_IRIS_READY_SELECTOR?.trim() || "#iris-dashboard-ready",
+    readyRejectSelector: process.env.FBR_IRIS_READY_REJECT_SELECTOR?.trim() || "#iris-password-reset-required",
+    readyUrlPattern: process.env.FBR_IRIS_READY_URL_PATTERN?.trim() || "/dashboard",
+    useMockIris,
+  };
+}
+
+// ─── Route Selector Config ───────────────────────────────────
+
+export type FbrRouteSelectorConfig = {
+  topMenuSelector: string;
+  leftCategorySelector: string;
+  formSelector: string;
+  formReadySelector: string;
+  periodSelector: string | null;
+  nameSelector: string | null;
+  generatePsidSelector: string | null;
+  psidDisplaySelector: string | null;
+  psidDownloadSelector: string | null;
+  cprDisplaySelector: string | null;
+  paidAmountSelector: string | null;
+  balancePayableSelector: string | null;
+  refundBannerSelector: string | null;
+  submitButtonSelector: string | null;
+  completionConfirmSelector: string | null;
+};
+
+export type FbrSelectorBundleSummary = {
+  bundleId: string;
+  bundleVersion: number;
+  source: "default_code" | "user_settings" | "global_db";
+  updatedAt: string;
+  notes: string | null;
+  hash: string;
+};
+
+export type FbrPortalAutomationConfig = {
+  portalHostAllowlist: string[];
+  readiness: {
+    loginUrl: string;
+    readySelector: string;
+    readyRejectSelector: string | null;
+    readyUrlPattern: string | null;
+  };
+  dryRun: {
+    entryUrl: string;
+    reviewGateSelector: string;
+    finalSubmitSelector: string;
+    completedTasksSelector: string | null;
+    pauseReason: string;
+  };
+  assistedFiling: {
+    readinessUrl: string;
+    passwordResetUrl: string;
+    otpCaptchaUrl: string;
+    paymentUrl: string;
+    finalReviewUrl: string;
+    completedTasksUrl: string;
+  };
+  classicAssistedFiling: {
+    finalReviewUrl: string;
+    pinEntryUrl: string;
+    completedTasksUrl: string;
+  };
+  routeSelector: FbrRouteSelectorConfig | null;
+  selectorBundle: FbrSelectorBundleSummary;
+  useMockIris: boolean;
+};
+
+// ─── Default Selector Bundle (from old repo v8-default-2026-05) ───
+
+const COMMON_RETURN_SELECTORS: Omit<FbrRouteSelectorConfig, "formSelector"> = {
+  topMenuSelector:
+    "#top-menu-income-tax-return, [data-iris-top-menu='income_tax_return'], a[href*='IncomeTaxReturn'], a[href*='income-tax-return']",
+  leftCategorySelector:
+    "#left-category-income-tax-return, [data-iris-left-category='income_tax_return'], a[href*='IncomeTaxReturn']",
+  formReadySelector:
+    "#iris-return-form-ready, form[data-iris-form-ready='true'], #return-tax-form",
+  periodSelector:
+    "#return-period, select[name='taxYear'], select[data-iris-field='tax_year'], input[name='taxYear']",
+  nameSelector:
+    "#taxpayer-name, input[name='taxpayerName'], input[data-iris-field='taxpayer_name']",
+  generatePsidSelector: "#generate-psid, [data-action='generate-psid']",
+  psidDisplaySelector: "#psid-number, [data-payment='psid-number']",
+  psidDownloadSelector: "#download-psid, [data-action='download-psid']",
+  cprDisplaySelector: "#cpr-reference, #mock-cpr-reference, [data-payment='cpr-reference']",
+  paidAmountSelector: "#paid-amount, [data-payment='paid-amount']",
+  balancePayableSelector: "#balance-payable, [data-payment='balance-payable']",
+  refundBannerSelector: "#refund-banner, [data-payment='refund-banner']",
+  submitButtonSelector: "#final-submit, button[data-action='submit-return'], button[type='submit']",
+  completionConfirmSelector:
+    "#completed-tasks-proof, [data-proof='completed-tasks'], [id*='completed-tasks']",
+};
+
+export const DEFAULT_SELECTOR_BUNDLE = {
+  id: "v8-default-2026-05-merged-with-iris-codes",
+  version: 2,
+  updatedAt: "2026-05-13T00:00:00.000Z",
+  notes: "Merged bundle: old v8 selectors + new IRIS field codes (1000, 2001, 500312, 64150301 etc) from IRIS_System_Field_Codes_Extracted.csv",
+  routeSelectors: {
+    simplified_salary_114i: {
+      ...COMMON_RETURN_SELECTORS,
+      formSelector:
+        "#form-114i, [data-iris-form='simplified_salary_114i'], [href*='114i'], [id*='114i']",
+    },
+    normal_individual_114: {
+      ...COMMON_RETURN_SELECTORS,
+      formSelector:
+        "#form-114, [data-iris-form='normal_individual_114'], [href*='normal-individual-114'], [id='form-114-original']",
+    },
+    normal_individual_114_revised: {
+      ...COMMON_RETURN_SELECTORS,
+      formSelector:
+        "#form-114-revised, [data-iris-form='normal_individual_114_revised'], [href*='114'][href*='revised'], [id*='revised-114']",
+    },
+    wealth_statement: {
+      ...COMMON_RETURN_SELECTORS,
+      topMenuSelector:
+        "#top-menu-wealth-statement, [data-iris-top-menu='wealth_statement'], a[href*='WealthStatement']",
+      leftCategorySelector:
+        "#left-category-wealth-statement, [data-iris-left-category='wealth_statement'], a[href*='WealthStatement']",
+      formSelector:
+        "#form-wealth-statement, [data-iris-form='wealth_statement'], [href*='wealth-statement']",
+    },
+    pre_step_application: {
+      ...COMMON_RETURN_SELECTORS,
+      topMenuSelector:
+        "#top-menu-application, [data-iris-top-menu='application'], a[href*='Application']",
+      leftCategorySelector:
+        "#left-category-application, [data-iris-left-category='application'], a[href*='Application']",
+      formSelector:
+        "#form-114i-election, [data-iris-form='pre_step_application'], [href*='114i'][href*='election']",
+    },
+    classic_individual_114: {
+      topMenuSelector:
+        "#correspondenceTabs\\:returnAmountForm\\:menuPanel, .return-data-left-menu .ui-panelmenu",
+      leftCategorySelector:
+        "#correspondenceTabs\\:returnAmountForm\\:j_idt425, .ui-panelmenu",
+      formSelector:
+        "#correspondenceTabs\\:returnAmountForm\\:data, form[id*='businessFormReturn'], form[id*='returnAmountForm']",
+      formReadySelector:
+        "#correspondenceTabs\\:returnAmountForm\\:data table.ui-datatable, .ui-datatable-data",
+      periodSelector: null,
+      nameSelector: null,
+      generatePsidSelector: null,
+      psidDisplaySelector: null,
+      psidDownloadSelector: null,
+      cprDisplaySelector: null,
+      paidAmountSelector: null,
+      balancePayableSelector: null,
+      refundBannerSelector: null,
+      submitButtonSelector:
+        "#correspondence\\:btnSave, button[id*='btnSave'], button[id*='btnSubmit']",
+      completionConfirmSelector:
+        "#correspondence\\:btnSubmit, button[id*='btnSubmit']",
+    },
+  } as Record<IrisRouteFamily, FbrRouteSelectorConfig>,
+};
+
+// ─── Automation Config Builder ───────────────────────────────────
+
+function splitHosts(value: string | undefined) {
+  return (value || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export async function getFbrPortalAutomationConfig(input?: {
+  routeFamily?: IrisRouteFamily | null;
+}): Promise<FbrPortalAutomationConfig> {
+  const desktop = getFbrDesktopAuthConfig();
+  const allowlist = splitHosts(process.env.FBR_IRIS_HOST_ALLOWLIST);
+
+  if (allowlist.length === 0 && !desktop.useMockIris) {
+    allowlist.push("iris.fbr.gov.pk");
+  }
+
+  const routeSelector =
+    input?.routeFamily && DEFAULT_SELECTOR_BUNDLE.routeSelectors[input.routeFamily]
+      ? DEFAULT_SELECTOR_BUNDLE.routeSelectors[input.routeFamily]
+      : null;
+
+  return {
+    portalHostAllowlist: allowlist,
+    readiness: {
+      loginUrl: desktop.loginUrl,
+      readySelector: desktop.readySelector,
+      readyRejectSelector: desktop.readyRejectSelector,
+      readyUrlPattern: desktop.readyUrlPattern,
+    },
+    dryRun: {
+      entryUrl: process.env.FBR_IRIS_DRY_RUN_URL?.trim() || "mock-iris://return",
+      reviewGateSelector:
+        process.env.FBR_IRIS_REVIEW_GATE_SELECTOR?.trim() || "#dry-run-review-gate",
+      finalSubmitSelector:
+        process.env.FBR_IRIS_FINAL_SUBMIT_SELECTOR?.trim() || "#final-submit",
+      completedTasksSelector:
+        process.env.FBR_IRIS_COMPLETED_TASKS_SELECTOR?.trim() || "#completed-tasks-proof",
+      pauseReason:
+        process.env.FBR_IRIS_DRY_RUN_PAUSE_REASON?.trim() ||
+        "Dry-run reached the final review gate. Final submit stays user controlled.",
+    },
+    assistedFiling: {
+      readinessUrl: process.env.FBR_IRIS_ASSISTED_READINESS_URL?.trim() || "mock-iris://dashboard",
+      passwordResetUrl: process.env.FBR_IRIS_PASSWORD_RESET_URL?.trim() || "mock-iris://password-reset",
+      otpCaptchaUrl: process.env.FBR_IRIS_OTP_CAPTCHA_URL?.trim() || "mock-iris://otp-captcha",
+      paymentUrl: process.env.FBR_IRIS_PAYMENT_URL?.trim() || "mock-iris://payment",
+      finalReviewUrl: process.env.FBR_IRIS_FINAL_REVIEW_URL?.trim() || "mock-iris://final-review",
+      completedTasksUrl: process.env.FBR_IRIS_COMPLETED_TASKS_URL?.trim() || "mock-iris://completed",
+    },
+    classicAssistedFiling: {
+      finalReviewUrl: process.env.FBR_IRIS_CLASSIC_FINAL_REVIEW_URL?.trim() || "mock-iris://classic-portal",
+      pinEntryUrl: process.env.FBR_IRIS_CLASSIC_PIN_URL?.trim() || "mock-iris://classic-pin",
+      completedTasksUrl: process.env.FBR_IRIS_CLASSIC_COMPLETED_TASKS_URL?.trim() || "mock-iris://classic-fixed-final-tax",
+    },
+    routeSelector,
+    selectorBundle: {
+      bundleId: DEFAULT_SELECTOR_BUNDLE.id,
+      bundleVersion: DEFAULT_SELECTOR_BUNDLE.version,
+      source: "default_code",
+      updatedAt: DEFAULT_SELECTOR_BUNDLE.updatedAt,
+      notes: DEFAULT_SELECTOR_BUNDLE.notes,
+      hash: "merged-v2",
+    },
+    useMockIris: desktop.useMockIris,
+  };
+}
+
+export async function getActiveFbrSelectorBundle() {
+  return {
+    activeBundle: {
+      bundleId: DEFAULT_SELECTOR_BUNDLE.id,
+      bundleVersion: DEFAULT_SELECTOR_BUNDLE.version,
+      source: "default_code" as const,
+      updatedAt: DEFAULT_SELECTOR_BUNDLE.updatedAt,
+      notes: DEFAULT_SELECTOR_BUNDLE.notes,
+      hash: "merged-v2",
+    },
+    selectorsByRouteFamily: DEFAULT_SELECTOR_BUNDLE.routeSelectors,
+  };
+}
+
+// ─── PrimeFaces Helpers (from old repo) ───────────────────────────────────
+
+export function buildPrimeFacesMenuClick(menuId: string): string {
+  const safeMenuId = menuId.replace(/[^a-zA-Z0-9_-]/g, "");
+  return [
+    `PrimeFaces.ab({`,
+    `  s:"correspondenceTabs:returnAmountForm:${safeMenuId}",`,
+    `  u:"correspondenceTabs:returnAmountForm:dropDown correspondenceTabs:returnAmountForm:showCalculateButtonPnl correspondenceTabs:returnAmountForm:data correspondenceTabs:returnAmountForm:menuPanel",`,
+    `  ps:true,`,
+    `  f:"correspondenceTabs:returnAmountForm"`,
+    `});`,
+  ].join("");
+}
+
+export function buildJsfDataTableCellSelector(
+  rowIndex: number,
+  column: "total" | "exempt" | "taxable",
+): string {
+  return `#correspondenceTabs\\:returnAmountForm\\:data\\:${rowIndex}\\:${column}`;
+}
+
+export function buildPrimeFacesDialogOpen(widgetVar: string): string {
+  const safeVar = widgetVar.replace(/[^a-zA-Z0-9_]/g, "");
+  return `PF('${safeVar}').show();`;
+}
+
+export function buildPrimeFacesToolbarAction(
+  action: "save" | "submit" | "cancel" | "edit",
+): string {
+  const sourceMap: Record<string, string> = {
+    edit: "correspondence:edit",
+    save: "correspondence:btnSave",
+    submit: "correspondence:btnSubmit",
+    cancel: "correspondence:btnCancle",
+  };
+  const source = sourceMap[action] ?? `correspondence:btn${action.charAt(0).toUpperCase() + action.slice(1)}`;
+  return `PrimeFaces.ab({s:"${source}"});`;
+}
+
+// ─── IRIS Field Mapping Helpers ───────────────────────────────────
+
+/**
+ * Get IRIS system code for a given category
+ * Example: SALARY -> 1000, RENT -> 2001, BANK_PROFIT -> 500312, 236C -> 64150301
+ */
+export function getIrisCodeForCategory(category: string): string | null {
+  const normalized = category.toUpperCase().trim();
+  const mapping = CATEGORY_TO_IRIS_MAP[normalized];
+  if (mapping && mapping.length > 0) {
+    return mapping[0].incomeCode;
+  }
+  return null;
+}
+
+/**
+ * Get adjustable tax code for a section
+ * Example: 149 -> 64020004, 236C -> 64150301, 236K -> 64151101
+ */
+export function getIrisCodeForTaxSection(section: string): string | null {
+  return TAX_SECTION_TO_IRIS_CODE[section] || TAX_SECTION_TO_IRIS_CODE[section.toUpperCase()] || null;
+}
+
+/**
+ * Build selector for IRIS field by system code
+ * Used by Electron agent to find input in IRIS DOM
+ */
+export function buildIrisFieldSelectorByCode(systemCode: string): string {
+  return `[data-system-code="${systemCode}"] input, [data-iris-code="${systemCode}"] input, input[name*="${systemCode}"], #field-${systemCode} input`;
+}
+
+/**
+ * Combined config for agent: selectors + field codes
+ */
+export function getCombinedAgentConfig() {
+  return {
+    selectors: DEFAULT_SELECTOR_BUNDLE,
+    irisCodes: IRIS_CODES,
+    categoryMap: CATEGORY_TO_IRIS_MAP,
+    taxSectionMap: TAX_SECTION_TO_IRIS_CODE,
+  };
+}
