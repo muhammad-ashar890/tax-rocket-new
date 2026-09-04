@@ -4,15 +4,17 @@ const tokenState = document.getElementById("tokenState");
 const accountReferenceInput = document.getElementById("accountReference");
 const openLoginButton = document.getElementById("openLoginButton");
 
+const agent = window.taxRocketAgent;
+
 let launchState = {
-  flow: "dld",
+  flow: "fbr",
   token: "",
   apiBaseUrl: "",
   accountReference: "",
 };
 
 function isFbrFlow() {
-  return launchState.flow === "fbr";
+  return launchState.flow !== "dld";
 }
 
 function setStatus(kind, message) {
@@ -22,7 +24,7 @@ function setStatus(kind, message) {
 
 function renderLaunchState(nextState) {
   launchState = {
-    flow: nextState?.flow === "fbr" ? "fbr" : "dld",
+    flow: nextState?.flow === "dld" ? "dld" : "fbr",
     token: nextState?.token || "",
     apiBaseUrl: nextState?.apiBaseUrl || "",
     accountReference: nextState?.accountReference || "",
@@ -40,7 +42,7 @@ function renderLaunchState(nextState) {
       "ready",
       isFbrFlow()
         ? "Connection request received. Iris sign-in will open automatically, and this trusted device will be marked ready after the local ready screen is detected."
-        : "Connection request received. MyDLD sign-in will open automatically, and this trusted device will be marked ready after login.",
+        : "Connection request received. Portal sign-in will open automatically, and this trusted device will be marked ready after login.",
     );
   } else {
     setStatus("idle", "Waiting for a connection request from the web app.");
@@ -48,21 +50,24 @@ function renderLaunchState(nextState) {
 }
 
 async function bootstrap() {
-  const initial = await window.ejariConnect.getLaunchState();
+  const initial = await agent.getLaunchState();
   renderLaunchState(initial);
 
-  window.ejariConnect.onLaunchState((payload) => {
+  agent.onLaunchState((payload) => {
     renderLaunchState(payload);
   });
 
-  window.ejariConnect.onStatusUpdate((payload) => {
-    setStatus(payload?.kind || "idle", payload?.message || "Waiting for a connection request from the web app.");
+  agent.onStatusUpdate((payload) => {
+    setStatus(
+      payload?.kind || "idle",
+      payload?.message || "Waiting for a connection request from the web app.",
+    );
   });
 }
 
 accountReferenceInput.addEventListener("input", async () => {
   try {
-    await window.ejariConnect.setAccountReference(accountReferenceInput.value);
+    await agent.setAccountReference(accountReferenceInput.value);
   } catch {
     // Ignore local sync errors; auto-capture can proceed without this optional value.
   }
@@ -70,15 +75,20 @@ accountReferenceInput.addEventListener("input", async () => {
 
 openLoginButton.addEventListener("click", async () => {
   try {
-    await window.ejariConnect.openDldLogin();
+    await agent.openPortalLogin();
     setStatus(
       "progress",
       isFbrFlow()
         ? "Official Iris login opened. Finish the local sign-in there and this trusted device will be marked ready automatically."
-        : "Official MyDLD login opened. Finish sign-in there and this trusted device will be marked ready automatically.",
+        : "Official portal login opened. Finish sign-in there and this trusted device will be marked ready automatically.",
     );
   } catch (error) {
-    setStatus("error", error instanceof Error ? error.message : "The login window could not be opened.");
+    setStatus(
+      "error",
+      error instanceof Error
+        ? error.message
+        : "The login window could not be opened.",
+    );
   }
 });
 

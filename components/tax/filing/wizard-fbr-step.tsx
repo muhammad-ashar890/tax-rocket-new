@@ -7,7 +7,7 @@ import {
   getFbrConnectionAction,
   type FbrConnectionView,
 } from "@/app/actions/fbr";
-import FbrConnectPanel from "@/components/tax/fbr-connect-panel";
+import FbrConnectClient from "@/components/tax/fbr-connect-client";
 import { StepHeading } from "@/components/tax/wizard-ui";
 
 type WizardFbrStepProps = Readonly<{
@@ -43,7 +43,7 @@ export function WizardFbrStep({
     <div className="space-y-6">
       <StepHeading
         title="File with FBR"
-        description="Launch the supervised FBR Connect agent after the approved packet is ready."
+        description="Open the desktop agent, then queue a dry run or assisted filing. OTP, CAPTCHA, and PIN stay on your computer."
       />
 
       <div className="rounded-xl border border-amanah/20 bg-amanah/5 p-5">
@@ -54,12 +54,12 @@ export function WizardFbrStep({
           FBR Connect — supervised filing
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Your local Trusted Desktop Agent connects to Iris on your own machine.
-          You will personally enter any OTP, CAPTCHA, or PIN.
+          TaxRocket never sees your OTP, CAPTCHA, or PIN. Complete those steps
+          in the desktop agent, then press Resume here.
         </p>
       </div>
 
-      <FbrConnectPanel
+      <FbrConnectClient
         draftId={draftId}
         initialConnection={connection}
         onConnectionStatusChange={onConnectionStatusChange}

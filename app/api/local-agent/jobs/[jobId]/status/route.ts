@@ -100,9 +100,26 @@ export async function POST(
       trustedDeviceId: device.id,
     };
 
-    if (pauseAction) {
-      updateData.pauseAction = normalizePauseAction(pauseAction);
-      updateData.pauseMessage = pauseMessage || null;
+    const resultObject =
+      result && typeof result === "object" && !Array.isArray(result)
+        ? (result as Record<string, unknown>)
+        : null;
+    const inferredPauseAction =
+      pauseAction ||
+      (status === JOB_STATUSES.AWAITING_USER_ACTION
+        ? String(resultObject?.requiredAction || "").trim()
+        : "");
+
+    if (inferredPauseAction) {
+      updateData.pauseAction = normalizePauseAction(inferredPauseAction);
+      updateData.pauseMessage =
+        pauseMessage ||
+        (typeof resultObject?.pauseReason === "string"
+          ? resultObject.pauseReason
+          : null) ||
+        (typeof resultObject?.message === "string"
+          ? resultObject.message
+          : null);
     } else if (status !== JOB_STATUSES.AWAITING_USER_ACTION) {
       // Clear pause if not awaiting
       updateData.pauseAction = null;
@@ -169,6 +186,7 @@ export async function POST(
               : "FILING_COMPLETED",
           completedAt: new Date(),
           message: `Job ${job.jobType} completed`,
+          errorMessage: null,
           lastHeartbeat: new Date(),
         },
       });

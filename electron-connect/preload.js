@@ -1,10 +1,11 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("ejariConnect", {
+const agentApi = {
   getLaunchState: () => ipcRenderer.invoke("get-launch-state"),
-  openDldLogin: () => ipcRenderer.invoke("open-dld-login"),
+  openPortalLogin: () => ipcRenderer.invoke("open-portal-login"),
   captureAndUpload: (input) => ipcRenderer.invoke("capture-and-upload", input),
-  setAccountReference: (value) => ipcRenderer.invoke("set-account-reference", value),
+  setAccountReference: (value) =>
+    ipcRenderer.invoke("set-account-reference", value),
   openExternal: (value) => ipcRenderer.invoke("open-external", value),
   getLocalBridgeUrl: () => ipcRenderer.invoke("get-local-bridge-url"),
   onLaunchState: (callback) => {
@@ -17,4 +18,6 @@ contextBridge.exposeInMainWorld("ejariConnect", {
     ipcRenderer.on("status-update", handler);
     return () => ipcRenderer.removeListener("status-update", handler);
   },
-});
+};
+
+contextBridge.exposeInMainWorld("taxRocketAgent", agentApi);

@@ -210,12 +210,15 @@ export async function queueAssistedFilingJobAction(draftId: string) {
           dryRun: false,
           requiresHumanConfirmation: true,
           pausePoints: [
-            "otp_required",
-            "captcha_required",
-            "pin_required",
-            "final_review",
-            "psid_payment",
+            "password_reset",
+            "otp_captcha_pin",
+            "payment_psid",
+            "final_submit_confirmation",
           ],
+          livePilotState: {
+            phase: "start",
+            confirmations: [],
+          },
         }),
         expiresAt: new Date(Date.now() + 4 * 60 * 60 * 1000), // 4 hours
       },

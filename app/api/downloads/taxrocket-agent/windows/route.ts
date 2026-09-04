@@ -1,59 +1,59 @@
-import { NextRequest, NextResponse } from "next/server";
+import { createReadStream } from "fs";
+import { stat } from "fs/promises";
+import { Readable } from "stream";
+import { NextResponse } from "next/server";
+import {
+  findDesktopInstallerPath,
+  installerDownloadName,
+} from "@/lib/tax/desktop-installer";
 
 /**
  * GET /api/downloads/taxrocket-agent/windows
- * Serves TaxRocket Portal Agent installer
- * 
- * In production, this would redirect to GCS signed URL
- * For now, returns placeholder with instructions
- * 
- * Also handles legacy endpoint: /api/downloads/dld-connection/windows
+ * Serves the local electron-builder .exe when present.
  */
-
-export async function GET(req: NextRequest) {
+export async function GET() {
   const gcsBucket = process.env.GCS_BUCKET_NAME;
-  const installerPath = process.env.TAXROCKET_AGENT_INSTALLER_PATH || "installers/taxrocket-portal-agent-latest.exe";
   const useGcs = process.env.USE_GCS === "true" && gcsBucket;
 
-  // If GCS configured, redirect to signed URL (TODO: implement signed URL generation)
   if (useGcs) {
-    // TODO: Generate GCS signed URL
-    // For now, return instruction
-    return NextResponse.json({
-      success: false,
-      message: "GCS bucket configured but signed URL generation not yet implemented",
-      bucket: gcsBucket,
-      path: installerPath,
-      instructions: "Implement GCS signed URL in this endpoint. See worker.md: npm run desktop-installer:upload",
-    }, { status: 501 });
+    return NextResponse.json(
+      {
+        success: false,
+        message:
+          "GCS bucket configured but signed URL generation is not implemented yet.",
+        bucket: gcsBucket,
+      },
+      { status: 501 },
+    );
   }
 
-  // Development placeholder - check if local file exists
-  const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
-  
-  return NextResponse.json({
-    success: false,
-    message: "Desktop Agent installer not yet built",
-    expectedEndpoints: {
-      new: "/api/downloads/taxrocket-agent/windows",
-      legacy: "/api/downloads/dld-connection/windows (still supported for backward compat)",
-    },
-    buildInstructions: {
-      dev: "npm run desktop-connect:dev (in electron-connect folder)",
-      build: "npm --prefix electron-connect run dist:win",
-      upload: "npm run desktop-installer:upload (uploads to GCS)",
-      env: {
-        GCS_BUCKET_NAME: "your-bucket",
-        USE_GCS: "true",
-        TAXROCKET_AGENT_INSTALLER_PATH: "installers/taxrocket-portal-agent-latest.exe",
+  const filePath = findDesktopInstallerPath();
+  if (filePath) {
+    const info = await stat(filePath);
+    const stream = Readable.toWeb(createReadStream(filePath)) as ReadableStream;
+    return new NextResponse(stream, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(info.size),
+        "Content-Disposition": `attachment; filename="${installerDownloadName(filePath)}"`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  return NextResponse.json(
+    {
+      success: false,
+      message:
+        "Installer .exe abhi build nahi hua. electron-connect folder mein npm run dist:win chalao.",
+      buildInstructions: {
+        cwd: "electron-connect",
+        install: "npm install",
+        build: "npm run dist:win",
+        output: "electron-connect/dist/TaxRocket-Portal-Agent-Setup-1.0.0.exe",
       },
     },
-    electronFolder: "electron-connect/ (needs to be created or copied from old repo)",
-    requiredFromClient: [
-      "electron-connect folder source code (main.js, preload.js, portal-agent.js)",
-      "package.json with electron-builder config",
-      "GCS credentials if using cloud storage",
-    ],
-    nextSteps: "Client needs to provide electron-connect source or confirm if we should scaffold new Electron app",
-  }, { status: 404 });
+    { status: 404 },
+  );
 }

@@ -36,7 +36,7 @@ export function buildDesktopSessionConfig(params: {
 }): DesktopSessionConfig {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min
   const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
-  
+
   return {
     launchToken: params.launchToken,
     partitionKey: params.partitionKey,
@@ -44,9 +44,11 @@ export function buildDesktopSessionConfig(params: {
     deepLink: `taxrocket-connect://connect?token=${params.launchToken}&partition=${params.partitionKey}&apiBaseUrl=${encodeURIComponent(baseUrl)}&baseUrl=${encodeURIComponent(baseUrl)}&flow=fbr`,
     localhostUrl: `http://127.0.0.1:37219/connect?token=${params.launchToken}&partition=${params.partitionKey}&apiBaseUrl=${encodeURIComponent(baseUrl)}&flow=fbr`,
     expiresAt,
-    irisLoginUrl: process.env.FBR_IRIS_LOGIN_URL || "https://iris.fbr.gov.pk/login",
+    irisLoginUrl:
+      process.env.FBR_IRIS_LOGIN_URL || "https://iris.fbr.gov.pk/login",
     irisReadySelector: process.env.FBR_IRIS_READY_SELECTOR || "body",
-    readyUrlPattern: process.env.FBR_IRIS_READY_URL_PATTERN || "iris.fbr.gov.pk",
+    readyUrlPattern:
+      process.env.FBR_IRIS_READY_URL_PATTERN || "iris.fbr.gov.pk",
   };
 }
 
@@ -68,30 +70,53 @@ export const JOB_STATUSES = {
 } as const;
 
 export const PAUSE_ACTIONS = {
+  PASSWORD_RESET: "password_reset",
   OTP: "otp_required",
+  OTP_CAPTCHA_PIN: "otp_captcha_pin",
   CAPTCHA: "captcha_required",
   PIN: "pin_required",
   CLASSIC_PIN_ENTRY: "classic_pin_entry", // legacy naming from worker.md
   PSID: "psid_payment",
+  PAYMENT_PSID: "payment_psid",
   FINAL_REVIEW: "final_review",
+  FINAL_SUBMIT_CONFIRMATION: "final_submit_confirmation",
   CLASSIC_FINAL_REVIEW: "classic_final_review", // legacy
   PAYMENT: "payment_required",
 } as const;
 
 export function isValidPauseAction(action: string): boolean {
-  return Object.values(PAUSE_ACTIONS).includes(action as any) || 
-         ["classic_final_review", "classic_pin_entry", "otp", "captcha", "pin", "psid", "final_review"].includes(action);
+  return (
+    Object.values(PAUSE_ACTIONS).includes(action as any) ||
+    [
+      "classic_final_review",
+      "classic_pin_entry",
+      "otp",
+      "captcha",
+      "pin",
+      "psid",
+      "final_review",
+      "password_reset",
+      "otp_captcha_pin",
+      "payment_psid",
+      "final_submit_confirmation",
+    ].includes(action)
+  );
 }
 
 export function normalizePauseAction(action: string): string {
   const mapping: Record<string, string> = {
-    classic_final_review: PAUSE_ACTIONS.FINAL_REVIEW,
-    classic_pin_entry: PAUSE_ACTIONS.PIN,
+    classic_final_review: PAUSE_ACTIONS.CLASSIC_FINAL_REVIEW,
+    classic_pin_entry: PAUSE_ACTIONS.CLASSIC_PIN_ENTRY,
     otp: PAUSE_ACTIONS.OTP,
     captcha: PAUSE_ACTIONS.CAPTCHA,
     pin: PAUSE_ACTIONS.PIN,
     psid: PAUSE_ACTIONS.PSID,
     final_review: PAUSE_ACTIONS.FINAL_REVIEW,
+    password_reset: PAUSE_ACTIONS.PASSWORD_RESET,
+    otp_captcha_pin: PAUSE_ACTIONS.OTP_CAPTCHA_PIN,
+    payment_psid: PAUSE_ACTIONS.PAYMENT_PSID,
+    payment_required: PAUSE_ACTIONS.PAYMENT_PSID,
+    final_submit_confirmation: PAUSE_ACTIONS.FINAL_SUBMIT_CONFIRMATION,
   };
   return mapping[action] || action;
 }

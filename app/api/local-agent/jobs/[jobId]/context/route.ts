@@ -108,6 +108,13 @@ export async function GET(
       );
     }
 
+    let payload: any = {};
+    try {
+      payload = JSON.parse(job.payloadJson || "{}");
+    } catch {
+      payload = {};
+    }
+
     // Mark job as accepted/running
     if (job.status === "created" || job.status === "offered_to_device") {
       await prisma.localAgentJob.update({
@@ -251,11 +258,20 @@ export async function GET(
     return NextResponse.json({
       success: true,
       ok: true,
+      // Electron reads job.payload.livePilotState to decide the next
+      // assisted-filing pause. Without this, every Resume restarts at
+      // password_reset.
+      payload,
+      livePilotState: payload?.livePilotState ?? {
+        phase: "start",
+        confirmations: [],
+      },
       job: {
         id: job.id,
         jobType: job.jobType,
         status: job.status,
         filingDraftId: job.filingDraftId,
+        payload,
       },
       packet: {
         id: packet.id,

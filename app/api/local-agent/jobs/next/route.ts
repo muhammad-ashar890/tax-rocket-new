@@ -55,16 +55,15 @@ export async function POST(req: NextRequest) {
     // Priority: jobs assigned to this device in created/offered status, then unassigned jobs for user's waiting drafts
     let job = null;
 
-    // 1. Check for jobs already offered to this device
+    // 1. Jobs already offered to this device.
+    // Do NOT claim awaiting_user_action — that status means the human
+    // must Resume in the web app first. Re-claiming it restarts the
+    // assisted flow from phase "start" and loops on password_reset.
     job = await prisma.localAgentJob.findFirst({
       where: {
         trustedDeviceId: device.id,
         status: {
-          in: [
-            JOB_STATUSES.CREATED,
-            JOB_STATUSES.OFFERED_TO_DEVICE,
-            JOB_STATUSES.AWAITING_USER_ACTION,
-          ],
+          in: [JOB_STATUSES.CREATED, JOB_STATUSES.OFFERED_TO_DEVICE],
         },
       },
       orderBy: { createdAt: "asc" },

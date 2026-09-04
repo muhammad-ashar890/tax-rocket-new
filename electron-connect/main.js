@@ -850,8 +850,7 @@ function clearAutoCaptureTimer() {
 function applyLaunchUrl(rawValue) {
   if (
     !rawValue ||
-    (!String(rawValue).startsWith("ejari-connect://") &&
-      !String(rawValue).startsWith("taxrocket-connect://"))
+    !String(rawValue).startsWith("taxrocket-connect://")
   ) {
     return false;
   }
@@ -1062,7 +1061,7 @@ async function ensureWorkerWindow() {
     title:
       launchState.flow === "fbr"
         ? "Tax Rocket Iris Dry Run"
-        : "Ejari Local Automation",
+        : "Tax Rocket Portal Agent",
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
     show: true,
@@ -1466,7 +1465,7 @@ async function setFileInputFiles(windowInstance, selector, filePaths) {
   const objectIdResponse =
     await windowInstance.webContents.debugger.sendCommand("Runtime.evaluate", {
       expression: `document.querySelector(${JSON.stringify(selector)})`,
-      objectGroup: "ejari-worker",
+      objectGroup: "taxrocket-worker",
     });
 
   if (!objectIdResponse?.result?.objectId) {
@@ -1559,7 +1558,10 @@ async function claimNextLocalJob() {
     },
   });
 
-  return payload?.job || null;
+  const job = payload?.job || null;
+  if (!job) return null;
+  if (job.status === "awaiting_user_action") return null;
+  return job;
 }
 
 async function loadLocalJobContext(jobId) {
@@ -1623,11 +1625,12 @@ async function runLocalDldFlow(jobContext, localDocuments) {
 
   await waitForVisibleSelector(windowInstance, config.validationSelector);
 
-  if (!config.ejariFlowUrl) {
-    throw new Error("Local DLD flow URL is not configured.");
+  const portalFlowUrl = config.portalFlowUrl || config.flowUrl;
+  if (!portalFlowUrl) {
+    throw new Error("Local portal flow URL is not configured.");
   }
 
-  await windowInstance.loadURL(config.ejariFlowUrl);
+  await windowInstance.loadURL(portalFlowUrl);
   await attachDebugger(windowInstance);
 
   try {
@@ -1669,8 +1672,8 @@ async function runLocalDldFlow(jobContext, localDocuments) {
     );
     await fillSelector(
       windowInstance,
-      fields.previousEjariId,
-      registration.previousEjariId,
+      fields.previousContractId,
+      registration.previousContractId,
     );
 
     const uploads = config.uploadSelectors || {};
@@ -2838,13 +2841,16 @@ async function runLocalTaxDryRunFlow(jobContext) {
 
 function getPilotStateFromContext(jobContext) {
   const payload = jobContext?.job?.payload || jobContext?.payload || {};
-  if (
-    payload &&
-    typeof payload === "object" &&
-    payload.livePilotState &&
-    typeof payload.livePilotState === "object"
-  ) {
-    return payload.livePilotState;
+  const live =
+    (payload && typeof payload === "object" && payload.livePilotState) ||
+    jobContext?.livePilotState ||
+    null;
+
+  if (live && typeof live === "object") {
+    return {
+      phase: typeof live.phase === "string" && live.phase ? live.phase : "start",
+      confirmations: Array.isArray(live.confirmations) ? live.confirmations : [],
+    };
   }
 
   return {
@@ -2858,6 +2864,8 @@ async function pauseAssistedPilot(job, windowInstance, input) {
     await captureWindowScreenshot(windowInstance, input.captureLabel),
   ];
   await updateLocalJobStatus(job.id, "awaiting_user_action", {
+    pauseAction: input.requiredAction,
+    pauseMessage: input.pauseReason || input.message,
     result: {
       message: input.message,
       pauseReason: input.pauseReason,
@@ -2894,6 +2902,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   const selectorBundle = getSelectorBundleSignal(jobContext);
   // Phase 15.5c F7/F9: Is this a classic portal route?
   const isClassic = isClassicPortalRoute(routeMetadata);
+  const shouldFillReturn = !pilotState.phase || pilotState.phase === "start";
 
   if (!portalFieldMap.length) {
     throw new Error(
@@ -2906,6 +2915,11 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   const dashboardUrl = resolveMockIrisUrl(
     assistedConfig.readinessUrl || "mock-iris://dashboard",
   );
+  const captures = [];
+
+  // After Resume, skip dashboard + return.html. Re-loading the filing
+  // form is what flashed Tax Payable / Opening Wealth over password-reset.
+  if (shouldFillReturn) {
   await windowInstance.loadURL(dashboardUrl);
   await waitForVisibleSelector(windowInstance, readySelector, 15000);
   executionLog.push({
@@ -2915,15 +2929,18 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
       "Desktop worker validated the trusted local Iris session before entering the live pilot.",
   });
 
-  const captures = [
-    await captureWindowScreenshot(
-      windowInstance,
-      STANDARD_CAPTURE_LABELS.READINESS,
-    ),
-  ];
+    captures.push(
+      await captureWindowScreenshot(
+        windowInstance,
+        STANDARD_CAPTURE_LABELS.READINESS,
+      ),
+    );
+  }
 
   // ── Phase 15.5c F7: Route-family-aware navigation branching ──
-  if (config.useMockIris) {
+  if (!shouldFillReturn) {
+    // Resume: jump straight to the pause URL for the current phase.
+  } else if (config.useMockIris) {
     const returnUrl = resolveWorkerEntryUrl(config);
     await windowInstance.loadURL(returnUrl);
   } else if (isClassic) {
@@ -2989,14 +3006,13 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     await windowInstance.loadURL(returnUrl);
   }
 
-  const prefillComparison = await collectPreFillComparison(
-    windowInstance,
-    portalFieldMap,
-  );
+  const prefillComparison = shouldFillReturn
+    ? await collectPreFillComparison(windowInstance, portalFieldMap)
+    : [];
   // Phase 18: Classic portal uses per-section navigation + fillClassicDataTable().
   // Each classic portal section is on its own JSF form page, so we navigate to each section,
   // handle Add-row if needed, fill its fields, then move to the next section.
-  if (isClassic) {
+  if (shouldFillReturn && isClassic) {
     // Group classic portal fields by irisSection for per-section navigation
     const sectionGroups = new Map();
     for (const field of portalFieldMap) {
@@ -3066,7 +3082,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
         await fillSelector(windowInstance, selector, field.value);
       }
     }
-  } else {
+  } else if (shouldFillReturn) {
     for (const field of portalFieldMap) {
       const selector =
         field.selector ||
@@ -3075,6 +3091,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     }
   }
 
+  if (shouldFillReturn) {
   executionLog.push({
     step: STANDARD_LOG_STEPS.PREFILL_COMPARE,
     label: "Pre-fill comparison captured",
@@ -3096,6 +3113,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
       STANDARD_CAPTURE_LABELS.FIELD_FILL,
     ),
   );
+  }
 
   // ── Phase 15.5c F9: Classic portal has no mid-filing password reset ──
   if (pilotState.phase === "start" && !isClassic) {
@@ -3161,7 +3179,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   if (
     pilotState.phase === "after_otp_captcha_pin" &&
     !isClassic &&
-    Number(snapshot.returnSummary?.taxPayable || 0) > 0
+    Number(snapshot.returnSummary?.taxPayable || snapshot.filing?.taxPayable || 0) > 0
   ) {
     await windowInstance.loadURL(
       resolveMockIrisUrl(assistedConfig.paymentUrl || "mock-iris://payment"),
@@ -3321,7 +3339,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     // Enforce ready_to_submit gate: if payment is required and submit is not unlocked,
     // pause for user intervention
     if (
-      Number(snapshot.returnSummary?.taxPayable || 0) > 0 &&
+      Number(snapshot.returnSummary?.taxPayable || snapshot.filing?.taxPayable || 0) > 0 &&
       !paymentVerification.submitUnlocked
     ) {
       return pauseAssistedPilot(job, windowInstance, {
@@ -3415,7 +3433,18 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
 }
 
 async function processLocalJob(job) {
+  if (job.status === "awaiting_user_action") {
+    return;
+  }
+
   const context = await loadLocalJobContext(job.id);
+  if (job.payload && typeof job.payload === "object") {
+    context.job = { ...(context.job || {}), id: job.id, payload: job.payload };
+    context.payload = job.payload;
+    if (job.payload.livePilotState) {
+      context.livePilotState = job.payload.livePilotState;
+    }
+  }
   pushStatus(
     "progress",
     `Running local desktop automation for job ${job.publicId || job.id}.`,
@@ -3553,7 +3582,6 @@ function getDeepLinkArgument(argv) {
   return (
     (argv || []).find(
       (value) =>
-        String(value).startsWith("ejari-connect://") ||
         String(value).startsWith("taxrocket-connect://"),
     ) || ""
   );
@@ -4006,6 +4034,14 @@ async function markTrustedDeviceReady() {
 
 ipcMain.handle("get-launch-state", async () => launchState);
 
+ipcMain.handle("open-portal-login", async () => {
+  await createLoginWindow(true);
+  return {
+    ok: true,
+    url: resolveDesktopLoginUrl(),
+  };
+});
+
 ipcMain.handle("open-dld-login", async () => {
   await createLoginWindow(true);
   return {
@@ -4056,14 +4092,10 @@ if (!singleInstanceLock) {
   app.whenReady().then(() => {
     try {
       if (process.defaultApp) {
-        app.setAsDefaultProtocolClient("ejari-connect", process.execPath, [
-          path.resolve(process.argv[1]),
-        ]);
         app.setAsDefaultProtocolClient("taxrocket-connect", process.execPath, [
           path.resolve(process.argv[1]),
         ]);
       } else {
-        app.setAsDefaultProtocolClient("ejari-connect");
         app.setAsDefaultProtocolClient("taxrocket-connect");
       }
     } catch (error) {
