@@ -18,7 +18,6 @@ import {
   type FbrConnectionView,
 } from "@/app/actions/fbr";
 import {
-  queueDryRunJobAction,
   queueAssistedFilingJobAction,
   getLocalAgentJobsAction,
   cancelJobAction,
@@ -26,11 +25,11 @@ import {
   getTrustedDevicesAction,
 } from "@/app/actions/fbr-jobs";
 
-type Props = {
+type Props = Readonly<{
   draftId?: string;
   initialConnection: FbrConnectionView | null;
   onConnectionStatusChange?: (status: string) => void;
-};
+}>;
 
 type DesktopSession = {
   launchToken: string;
@@ -62,19 +61,8 @@ type DeviceView = {
   createdAt: string | Date;
 };
 
-const STATUS_LABELS: Record<string, string> = {
-  NOT_STARTED: "Not started",
-  WAITING_FOR_AGENT: "Waiting for desktop agent",
-  AGENT_CONNECTED: "Agent ready",
-  DRY_RUN_QUEUED: "Dry run queued",
-  FILING_QUEUED: "Filing queued",
-  DRY_RUN_COMPLETED: "Dry run completed",
-  FILING_COMPLETED: "Filing completed",
-  CONNECTED: "Agent ready",
-  RUNNING: "Filing in progress",
-  COMPLETED: "Filing completed",
-  FAILED: "Failed",
-};
+type Phase = "connect" | "start" | "working" | "resume" | "done";
+type FlowStep = "connect" | "start" | "resume";
 
 const PAUSE_LABELS: Record<string, string> = {
   password_reset: "Password reset",
@@ -88,28 +76,37 @@ const PAUSE_LABELS: Record<string, string> = {
   final_review: "Final review",
 };
 
-const JOB_STATUS_LABELS: Record<string, string> = {
-  created: "Queued",
-  offered_to_device: "Sent to agent",
-  accepted_by_device: "Accepted",
-  running: "Running",
-  awaiting_user_action: "Action needed",
-  completed: "Completed",
-  failed: "Failed",
-  cancelled: "Cancelled",
-};
-
-const ACTIVE_JOB_STATUSES = [
+const ACTIVE_JOB_STATUSES = new Set([
   "created",
   "offered_to_device",
   "accepted_by_device",
   "running",
   "awaiting_user_action",
+]);
+
+const FLOW_STEPS: ReadonlyArray<{ id: FlowStep; n: string; label: string }> = [
+  { id: "connect", n: "1", label: "Open agent" },
+  { id: "start", n: "2", label: "Start filing" },
+  { id: "resume", n: "3", label: "Confirm on screen" },
 ];
+
+const FLOW_ORDER: FlowStep[] = ["connect", "start", "resume"];
 
 function formatWhen(value: string | Date | null | undefined) {
   if (!value) return "";
   return new Date(value).toLocaleString();
+}
+
+function flowStepForPhase(phase: Phase): FlowStep {
+  if (phase === "connect") return "connect";
+  if (phase === "start" || phase === "working") return "start";
+  return "resume";
+}
+
+function chipClass(isDone: boolean, isCurrent: boolean) {
+  if (isDone) return "border-green-200 bg-green-50 text-green-800";
+  if (isCurrent) return "border-amanah/30 bg-amanah/5 text-foreground";
+  return "text-muted-foreground";
 }
 
 export default function FbrConnectClient({
@@ -118,13 +115,14 @@ export default function FbrConnectClient({
   onConnectionStatusChange,
 }: Props) {
   const [connection, setConnection] = useState(initialConnection);
-  const [starting, setStarting] = useState(false);
   const [session, setSession] = useState<DesktopSession | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [jobs, setJobs] = useState<JobView[]>([]);
   const [devices, setDevices] = useState<DeviceView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [startOver, setStartOver] = useState(false);
+  const [installedAck, setInstalledAck] = useState(false);
 
   useEffect(() => {
     setConnection(initialConnection);
@@ -136,31 +134,47 @@ export default function FbrConnectClient({
 
   useEffect(() => {
     if (!draftId) return;
+    let cancelled = false;
 
-    const tick = () => {
-      void refreshJobs();
-      void refreshConnection();
-      void refreshDevices();
+    const tick = async () => {
+      const [conn, jobResult, deviceResult] = await Promise.all([
+        getFbrConnectionAction(draftId),
+        getLocalAgentJobsAction(draftId),
+        getTrustedDevicesAction(draftId),
+      ]);
+      if (cancelled) return;
+      if (conn.success) setConnection(conn.connection);
+      if (jobResult.success && jobResult.jobs) {
+        setJobs(jobResult.jobs as JobView[]);
+      }
+      if (deviceResult.success && deviceResult.devices) {
+        setDevices(deviceResult.devices as DeviceView[]);
+      }
     };
 
-    tick();
-    const timer = window.setInterval(tick, 2500);
-    return () => window.clearInterval(timer);
+    void tick();
+    const timer = window.setInterval(() => {
+      void tick();
+    }, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [draftId]);
-
-  async function refreshConnection() {
-    if (!draftId) return;
-    const result = await getFbrConnectionAction(draftId);
-    if (result.success) {
-      setConnection(result.connection);
-    }
-  }
 
   async function refreshJobs() {
     if (!draftId) return;
     const result = await getLocalAgentJobsAction(draftId);
     if (result.success && result.jobs) {
       setJobs(result.jobs as JobView[]);
+    }
+  }
+
+  async function refreshConnection() {
+    if (!draftId) return;
+    const result = await getFbrConnectionAction(draftId);
+    if (result.success) {
+      setConnection(result.connection);
     }
   }
 
@@ -171,24 +185,12 @@ export default function FbrConnectClient({
     }
   }
 
-  async function handleStart() {
-    if (!draftId) return;
-    setStarting(true);
-    setError(null);
-    const result = await startFbrConnectionAction(draftId);
-    setStarting(false);
-    if (!result.success) {
-      setError(result.error ?? "Failed to start");
-      return;
-    }
-    setConnection(result.connection);
-  }
-
   async function handleCreateSession() {
     if (!draftId) return;
     setSessionLoading(true);
     setError(null);
     try {
+      await startFbrConnectionAction(draftId);
       const res = await fetch("/api/fbr-connect/desktop/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -196,7 +198,7 @@ export default function FbrConnectClient({
       });
       const data = await res.json();
       if (!data.success) {
-        setError(data.error || "Failed to create session");
+        setError(data.error || "Could not start the desktop agent");
       } else {
         setSession(data.session);
         try {
@@ -211,38 +213,28 @@ export default function FbrConnectClient({
             }),
           });
         } catch {
-          // Installed agent is opened via deep link below.
+          // Installed app opens via deep link.
         }
+        window.location.href = data.session.deepLink;
       }
     } catch {
-      setError("Failed to create desktop session");
+      setError("Could not start the desktop agent");
     }
     setSessionLoading(false);
     void refreshDevices();
+    void refreshConnection();
   }
 
-  async function handleQueueDryRun() {
-    if (!draftId) return;
-    setActionLoading("dry_run");
-    setError(null);
-    const result = await queueDryRunJobAction(draftId);
-    setActionLoading(null);
-    if (!result.success) {
-      setError(result.error || "Failed to queue dry run");
-    } else {
-      void refreshJobs();
-    }
-  }
-
-  async function handleQueueAssisted() {
+  async function handleStartFiling() {
     if (!draftId) return;
     setActionLoading("assisted");
     setError(null);
     const result = await queueAssistedFilingJobAction(draftId);
     setActionLoading(null);
     if (!result.success) {
-      setError(result.error || "Failed to queue assisted filing");
+      setError(result.error || "Could not start filing");
     } else {
+      setStartOver(false);
       void refreshJobs();
     }
   }
@@ -252,7 +244,7 @@ export default function FbrConnectClient({
     const result = await cancelJobAction(jobId);
     setActionLoading(null);
     if (!result.success) {
-      setError(result.error || "Failed to cancel");
+      setError(result.error || "Could not cancel");
     } else {
       void refreshJobs();
     }
@@ -266,280 +258,229 @@ export default function FbrConnectClient({
     });
     setActionLoading(null);
     if (!result.success) {
-      setError(result.error || "Failed to resume");
+      setError(result.error || "Could not continue");
     } else {
       void refreshJobs();
     }
   }
 
-  const status = connection?.status ?? "NOT_STARTED";
-  const showStaleError =
-    Boolean(error) ||
-    (Boolean(connection?.errorMessage) && status === "FAILED");
-  const hasActiveJob = jobs.some((j) => ACTIVE_JOB_STATUSES.includes(j.status));
-  const readyDevices = devices
+  const readyDevice = devices
     .filter((d) => d.status === "ACTIVE")
     .sort((a, b) => {
       const at = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
       const bt = b.lastSeenAt ? new Date(b.lastSeenAt).getTime() : 0;
       return bt - at;
-    })
-    .slice(0, 3);
-  const visibleJobs = jobs.slice(0, 6);
+    })[0];
+  const agentReady = Boolean(readyDevice?.localFbrConnectedAt || session);
+  const activeJob = jobs.find((j) => ACTIVE_JOB_STATUSES.has(j.status));
+  const completedFiling = jobs.find(
+    (j) => j.jobType !== "tax_dry_run" && j.status === "completed",
+  );
+
+  let phase: Phase = "connect";
+  if (activeJob?.status === "awaiting_user_action") phase = "resume";
+  else if (activeJob) phase = "working";
+  else if (completedFiling && agentReady && !startOver) phase = "done";
+  else if (agentReady) phase = "start";
+
+  const activeFlowStep = flowStepForPhase(phase);
+  const activeIndex = FLOW_ORDER.indexOf(activeFlowStep);
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed p-6 text-center">
-        <ShieldCheck className="h-6 w-6 text-amanah" />
-        <p className="text-sm font-medium">Desktop agent</p>
-        <p className="text-xs text-muted-foreground">
-          {STATUS_LABELS[status] ?? status}
-        </p>
-        {connection?.message && status !== "FAILED" && (
-          <p className="max-w-md text-xs text-muted-foreground">
-            {connection.message}
-          </p>
-        )}
-        {showStaleError && (
-          <p className="text-xs text-destructive">
-            {error ?? connection?.errorMessage}
-          </p>
-        )}
-
-        <div className="flex flex-wrap justify-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            disabled={!draftId || sessionLoading}
-            onClick={handleCreateSession}
-            className="gap-2"
-          >
-            {sessionLoading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Monitor className="h-3.5 w-3.5" />
-            )}
-            Open Desktop Agent
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={!draftId || starting}
-            onClick={handleStart}
-            className="gap-2"
-          >
-            {starting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <ExternalLink className="h-3.5 w-3.5" />
-            )}
-            Prepare connection
-          </Button>
-        </div>
-
-        {session && (
-          <div className="mt-2 w-full rounded-lg border bg-muted/40 p-3 text-left text-xs">
-            <p className="font-medium">Agent session is ready</p>
-            <p className="mt-1 text-muted-foreground">
-              If the app did not open, click the button below. Session expires{" "}
-              {formatWhen(session.expiresAt)}.
-            </p>
-            <Button
-              size="sm"
-              className="mt-3 gap-2"
-              onClick={() => {
-                window.location.href = session.deepLink;
-              }}
+    <div className="space-y-5">
+      <ol className="grid gap-2 text-xs sm:grid-cols-3">
+        {FLOW_STEPS.map((step) => {
+          const stepIndex = FLOW_ORDER.indexOf(step.id);
+          const isDone = phase === "done" || stepIndex < activeIndex;
+          const isCurrent = !isDone && step.id === activeFlowStep;
+          return (
+            <li
+              key={step.id}
+              className={`rounded-lg border px-3 py-2 ${chipClass(isDone, isCurrent)}`}
             >
-              <ExternalLink className="h-3.5 w-3.5" /> Open Tax Rocket Portal
-              Agent
-            </Button>
-          </div>
-        )}
-      </div>
+              <span className="font-medium">
+                {step.n}. {step.label}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
 
-      {readyDevices.length > 0 && (
+      {error && <p className="text-xs text-destructive">{error}</p>}
+
+      {phase === "connect" && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <Monitor className="h-4 w-4" /> This computer
+              <Monitor className="h-4 w-4" /> Step 1 — Install the desktop agent
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2">
-            {readyDevices.map((d) => (
-              <div
-                key={d.id}
-                className="flex items-center justify-between rounded border p-2 text-xs"
-              >
-                <div>
-                  <p className="font-medium">
-                    {d.deviceName || "Desktop Agent"}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    {d.localFbrConnectedAt ? "Ready for Iris" : "Connected"}
-                    {d.lastSeenAt ? ` · Last seen ${formatWhen(d.lastSeenAt)}` : ""}
-                  </p>
-                </div>
-                <div className="h-2 w-2 rounded-full bg-green-500" />
-              </div>
-            ))}
+          <CardContent className="space-y-4 text-sm">
+            <p className="text-muted-foreground">
+              Filing runs on this computer. Download the Tax Rocket Portal
+              Agent, install it, then confirm below.
+            </p>
+            <Button asChild size="sm" className="gap-2">
+              <a href="/api/downloads/taxrocket-agent/windows">
+                <Download className="h-3.5 w-3.5" /> Download for Windows
+              </a>
+            </Button>
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 accent-amanah"
+                checked={installedAck}
+                onChange={(event) => setInstalledAck(event.target.checked)}
+              />
+              <span>
+                I already installed this app
+                {installedAck ? (
+                  <CheckCircle className="ml-1 inline h-3.5 w-3.5 text-green-600" />
+                ) : null}
+              </span>
+            </label>
+            <Button
+              size="sm"
+              disabled={!draftId || !installedAck || sessionLoading}
+              onClick={handleCreateSession}
+              className="gap-2"
+            >
+              {sessionLoading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Monitor className="h-3.5 w-3.5" />
+              )}
+              Open Desktop Agent
+            </Button>
           </CardContent>
         </Card>
       )}
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Filing</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex flex-wrap gap-2">
+      {phase === "start" && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <ShieldCheck className="h-4 w-4" /> Step 2 — Start filing
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              Agent is ready
+              {readyDevice?.deviceName ? ` on ${readyDevice.deviceName}` : ""}.
+              This fills your return in IRIS and pauses when a password reset,
+              OTP, PIN, or payment is needed.
+            </p>
             <Button
-              type="button"
               size="sm"
-              disabled={!draftId || hasActiveJob || !!actionLoading}
-              onClick={handleQueueDryRun}
-              className="gap-2"
-            >
-              {actionLoading === "dry_run" ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Play className="h-3.5 w-3.5" />
-              )}
-              Queue Dry Run
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={!draftId || hasActiveJob || !!actionLoading}
-              onClick={handleQueueAssisted}
+              disabled={!draftId || !!actionLoading}
+              onClick={handleStartFiling}
               className="gap-2"
             >
               {actionLoading === "assisted" ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <ShieldCheck className="h-3.5 w-3.5" />
+                <Play className="h-3.5 w-3.5" />
               )}
-              Queue Assisted Filing
+              Start filing
             </Button>
-          </div>
+          </CardContent>
+        </Card>
+      )}
 
-          <p className="text-[11px] text-muted-foreground">
-            Dry run fills the return and stops before submit. Assisted filing
-            pauses for OTP, PIN, and PSID — press Resume after each step.
-          </p>
-
-          {visibleJobs.length === 0 ? (
-            <p className="py-4 text-center text-xs text-muted-foreground">
-              No filing jobs yet
+      {phase === "working" && activeJob && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Loader2 className="h-4 w-4 animate-spin" /> Filing in progress
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              Look at the Tax Rocket Portal Agent window. Do not start another
+              filing. If a password, OTP, PIN, or payment appears, complete it
+              there — this page will then ask you to continue.
             </p>
-          ) : (
-            <div className="space-y-2">
-              {visibleJobs.map((job) => (
-                <div key={job.id} className="rounded border p-3 text-xs">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="flex items-center gap-1.5 font-medium">
-                        {job.jobType === "tax_dry_run" ? (
-                          <Play className="h-3 w-3" />
-                        ) : (
-                          <ShieldCheck className="h-3 w-3" />
-                        )}
-                        {job.jobType === "tax_dry_run"
-                          ? "Dry Run"
-                          : "Assisted Filing"}
-                        <span
-                          className={`ml-2 rounded px-1.5 py-0.5 text-[10px] ${
-                            job.status === "completed"
-                              ? "bg-green-100 text-green-700"
-                              : job.status === "failed"
-                                ? "bg-red-100 text-red-700"
-                                : job.status === "awaiting_user_action"
-                                  ? "bg-amber-100 text-amber-700"
-                                  : job.status === "cancelled"
-                                    ? "bg-muted text-muted-foreground"
-                                    : "bg-blue-100 text-blue-700"
-                          }`}
-                        >
-                          {JOB_STATUS_LABELS[job.status] ?? job.status}
-                        </span>
-                      </p>
-                      <p className="text-[11px] text-muted-foreground">
-                        {formatWhen(job.createdAt)}
-                      </p>
-                      {job.pauseAction &&
-                        job.status === "awaiting_user_action" && (
-                          <div className="mt-1 rounded bg-amber-50 p-1.5 text-amber-800">
-                            <p className="font-medium">
-                              {PAUSE_LABELS[job.pauseAction] ?? job.pauseAction}
-                            </p>
-                            {job.pauseMessage && (
-                              <p className="text-[11px]">{job.pauseMessage}</p>
-                            )}
-                          </div>
-                        )}
-                      {job.status === "failed" && job.errorMessage && (
-                        <p className="mt-1 text-[11px] text-red-600">
-                          {job.errorMessage}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      {job.status === "awaiting_user_action" && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-6 text-[11px]"
-                          disabled={actionLoading === job.id}
-                          onClick={() => handleResumeJob(job.id)}
-                        >
-                          {actionLoading === job.id ? (
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                          ) : (
-                            <CheckCircle className="h-3 w-3" />
-                          )}
-                          Resume
-                        </Button>
-                      )}
-                      {ACTIVE_JOB_STATUSES.includes(job.status) && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-6 text-[11px]"
-                          disabled={actionLoading === job.id}
-                          onClick={() => handleCancelJob(job.id)}
-                        >
-                          Cancel
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+            <p className="text-xs text-muted-foreground">
+              Assisted filing · started {formatWhen(activeJob.createdAt)}
+            </p>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={actionLoading === activeJob.id}
+              onClick={() => handleCancelJob(activeJob.id)}
+            >
+              Cancel this filing
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <Download className="h-4 w-4" /> Desktop Agent
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-xs">
-          <p className="text-muted-foreground">
-            Install once on this Windows PC. OTP and PIN never leave the
-            machine.
-          </p>
-          <Button asChild size="sm" variant="outline" className="gap-2">
-            <a href="/api/downloads/taxrocket-agent/windows">
-              <Download className="h-3.5 w-3.5" /> Download for Windows
-            </a>
-          </Button>
-        </CardContent>
-      </Card>
+      {phase === "resume" && activeJob && (
+        <Card className="border-amber-200">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm text-amber-800">
+              <CheckCircle className="h-4 w-4" /> Step 3 — Continue
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p>
+              {PAUSE_LABELS[activeJob.pauseAction || ""] ??
+                "Action needed in the desktop agent"}
+            </p>
+            {activeJob.pauseMessage && (
+              <p className="text-muted-foreground">{activeJob.pauseMessage}</p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Finish that step in the agent window, then press Continue here.
+            </p>
+            <Button
+              size="sm"
+              disabled={actionLoading === activeJob.id}
+              onClick={() => handleResumeJob(activeJob.id)}
+              className="gap-2"
+            >
+              {actionLoading === activeJob.id ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <ExternalLink className="h-3.5 w-3.5" />
+              )}
+              Continue
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {phase === "done" && (
+        <Card className="border-green-200 bg-green-50/40">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm text-green-800">
+              <CheckCircle className="h-4 w-4" /> Filing finished
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              Assisted filing completed
+              {completedFiling
+                ? ` at ${formatWhen(
+                    completedFiling.completedAt || completedFiling.createdAt,
+                  )}`
+                : ""}
+              .
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setStartOver(true);
+                setError(null);
+              }}
+            >
+              File again
+            </Button>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

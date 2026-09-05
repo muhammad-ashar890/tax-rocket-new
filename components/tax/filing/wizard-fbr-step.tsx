@@ -43,7 +43,7 @@ export function WizardFbrStep({
     <div className="space-y-6">
       <StepHeading
         title="File with FBR"
-        description="Open the desktop agent, then queue a dry run or assisted filing. OTP, CAPTCHA, and PIN stay on your computer."
+        description="Open the desktop agent, start filing, then confirm OTP, PIN, or payment on this computer."
       />
 
       <div className="rounded-xl border border-amanah/20 bg-amanah/5 p-5">
@@ -55,7 +55,7 @@ export function WizardFbrStep({
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           TaxRocket never sees your OTP, CAPTCHA, or PIN. Complete those steps
-          in the desktop agent, then press Resume here.
+          in the desktop agent, then press Continue here.
         </p>
       </div>
 
