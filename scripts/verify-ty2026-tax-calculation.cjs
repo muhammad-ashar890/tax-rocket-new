@@ -142,8 +142,9 @@ check(
   "ESTIMATE",
 );
 
-// Above 10m the card only covers a pensioner below 70; without that
-// confirmation the route must not fall through to the salary slabs.
+// Above 10m the card covers a pensioner below 70 and Section 12(2A)(i)
+// exempts a pensioner at 70; without a confirmed age the route must not fall
+// through to the salary slabs.
 const pensionUnknownAge = pensionEstimate(15_000_000);
 check(
   "Pension above 10m without confirmed age needs rules",
@@ -154,6 +155,22 @@ check(
   "Pension above 10m without confirmed age has no tax figure",
   pensionUnknownAge.taxDue,
   null,
+);
+
+const pension70Plus = pensionEstimate(15_000_000, {
+  pensionerAgeBelow70: false,
+  pensionerAge70OrAbove: true,
+});
+check(
+  "Pension 15m at 70-plus is estimated",
+  pension70Plus.status,
+  "ESTIMATE",
+);
+check("Pension 15m at 70-plus pays nothing", pension70Plus.taxDue, 0);
+check(
+  "Pension 15m at 70-plus carries no surcharge",
+  pension70Plus.surcharge,
+  0,
 );
 
 const pensionBelow70 = pensionEstimate(15_000_000, {
@@ -170,6 +187,45 @@ check(
   25_000,
 );
 check("Pension 15m total tax due", pensionBelow70.taxDue, 275_000);
+check(
+  "Pension above 10m is a final-tax line",
+  pensionBelow70.breakdown[0].isFinalTax,
+  true,
+);
+check(
+  "Pension above 10m carries final tax due",
+  pensionBelow70.finalTaxDue,
+  275_000,
+);
+check(
+  "Pension above 10m carries no assessable tax",
+  pensionBelow70.assessableTaxDue,
+  0,
+);
+check(
+  "Pension up to 10m is also a final-tax line",
+  pensionEstimate(9_000_000).breakdown[0].isFinalTax,
+  true,
+);
+check(
+  "The 70-plus limb stays non-final: it is exempt, not charged as final tax",
+  pension70Plus.breakdown[0].isFinalTax,
+  false,
+);
+const pensionOverWithheld = pensionEstimate(
+  15_000_000,
+  { pensionerAgeBelow70: true, taxWithheld: 500_000 },
+);
+check(
+  "Over-withholding on a final pension claims no refund",
+  pensionOverWithheld.refundDue,
+  0,
+);
+check(
+  "The pension note discloses the final-tax treatment",
+  pensionBelow70.breakdown[0].note.includes("as a final tax"),
+  true,
+);
 // Regression guard: the salary slabs would have produced 4,431,000.
 check(
   "Pension 15m does not use the salary slabs",
@@ -375,9 +431,9 @@ check(
   "TURNS_70_DURING_YEAR",
 );
 check(
-  "Turning 70 during the year blocks the route",
+  "Turning 70 during the year uses the below-70 row (first-day rule)",
   turns70OnLastDay.isBelow70,
-  false,
+  true,
 );
 
 // Turns 70 on 1 July 2025, the first day of the tax year.
@@ -415,6 +471,15 @@ const pensionFromDob = pensionEstimate(15_000_000, {
 check(
   "Pension 15m for a 66-year-old is calculated",
   pensionFromDob.taxDue,
+  275_000,
+);
+
+const pensionTurns70 = pensionEstimate(15_000_000, {
+  pensionerAgeBelow70: bracketFor("1956-06-30").isBelow70,
+});
+check(
+  "Pension 15m for a turns-70 pensioner is calculated (first-day rule)",
+  pensionTurns70.taxDue,
   275_000,
 );
 
@@ -711,52 +776,198 @@ check(
   "salary,property_rent,bank_profit",
 );
 
-// --- The unresolved aggregation question -----------------------------------
+// --- The aggregation rule --------------------------------------------------
 //
-// Two progressive routes cannot be priced until it is confirmed whether they
-// share one slab. The rate card prices deduction at source and is silent on
-// assessment, so this must escalate rather than guess.
+// Assessable slab routes share ONE slab read against their combined taxable
+// income (Division I reaches "taxable income"; FA2025 abolished rental's
+// separate block). Clause (2) applies where salary-head income exceeds 75% of
+// the total, else clause (1); the 4AB surcharge runs on the combined figure.
+// A pension charged as final tax stands apart (Sections 12(2A), 169).
 
+// Salary 8m + rent 4m: salary-head is 67% of 12m, so clause (1) reads
+// 1,610,000 + 45% of 6.4m = 4,490,000, plus 9% surcharge (salary exists).
 const salaryPlusIndividualRent = multiEstimate([
   { route: "salary", income: 8_000_000 },
   { route: "property_rent", income: 4_000_000 },
 ]);
 check(
-  "Two progressive routes are not priced",
+  "Salary plus rental is priced",
   salaryPlusIndividualRent.status,
-  "NEEDS_RULES",
+  "ESTIMATE",
 );
-check("No figure is invented", salaryPlusIndividualRent.taxDue, null);
-check("No breakdown is produced", salaryPlusIndividualRent.breakdown.length, 0);
 check(
-  "The message names both sources",
-  salaryPlusIndividualRent.note.includes("salary") &&
-    salaryPlusIndividualRent.note.includes("rental income"),
+  "The pair produces one joint line",
+  salaryPlusIndividualRent.breakdown.length,
+  1,
+);
+check(
+  "The joint line carries the combined income",
+  salaryPlusIndividualRent.breakdown[0].income,
+  12_000_000,
+);
+check(
+  "Clause (1) base tax on 12m",
+  salaryPlusIndividualRent.baseTax,
+  4_490_000,
+);
+check(
+  "Combined 9% surcharge above 10m",
+  salaryPlusIndividualRent.surcharge,
+  404_100,
+);
+check(
+  "Combined total is 4,894,100",
+  salaryPlusIndividualRent.taxDue,
+  4_894_100,
+);
+check(
+  "The joint line stays assessable",
+  salaryPlusIndividualRent.breakdown[0].isFinalTax,
+  false,
+);
+check(
+  "The note names both sources and the table",
+  salaryPlusIndividualRent.breakdown[0].note.includes("salary") &&
+    salaryPlusIndividualRent.breakdown[0].note.includes("rental income") &&
+    salaryPlusIndividualRent.breakdown[0].note.includes("clause (1)"),
   true,
 );
 check(
-  "The message states the combined figure",
-  salaryPlusIndividualRent.note.includes("12,000,000"),
-  true,
-);
-check(
-  "The message raises the surcharge threshold",
-  salaryPlusIndividualRent.note.includes("10,000,000"),
+  "The note states the combined figure",
+  salaryPlusIndividualRent.breakdown[0].note.includes("12,000,000"),
   true,
 );
 
+// Salary 8m + rent 2m: salary-head is 80% of 10m, so the salaried clause (2)
+// table reads 616,000 + 35% of 5.9m = 2,681,000 with no surcharge at 10m.
+const salaryPlusSmallRent = multiEstimate([
+  { route: "salary", income: 8_000_000 },
+  { route: "property_rent", income: 2_000_000 },
+]);
+check(
+  "The 75% test selects clause (2)",
+  salaryPlusSmallRent.breakdown[0].note.includes("clause (2)"),
+  true,
+);
+check(
+  "Clause (2) base tax on 10m",
+  salaryPlusSmallRent.baseTax,
+  2_681_000,
+);
+check(
+  "No surcharge at exactly 10m (the threshold is exclusive)",
+  salaryPlusSmallRent.surcharge,
+  0,
+);
+check(
+  "Combined total is 2,681,000",
+  salaryPlusSmallRent.taxDue,
+  2_681_000,
+);
+
+// A final-tax pension never joins the slab: salary 5m prices alone at
+// 616,000 + 35% of 0.9m = 931,000 beside a zero-tax final pension line.
 const salaryPlusPension = multiEstimate([
   { route: "salary", income: 5_000_000 },
   { route: "pension", income: 3_000_000 },
 ]);
 check(
-  "Salary plus pension also escalates",
+  "Salary plus pension is priced",
   salaryPlusPension.status,
-  "NEEDS_RULES",
+  "ESTIMATE",
+);
+check(
+  "Pension stands apart as its own line",
+  salaryPlusPension.breakdown.length,
+  2,
+);
+check(
+  "The pension line is final with no tax",
+  lineFor(salaryPlusPension, "pension").isFinalTax &&
+    lineFor(salaryPlusPension, "pension").taxDue === 0,
+  true,
+);
+check(
+  "Salary prices alone at 931,000",
+  lineFor(salaryPlusPension, "salary").taxDue,
+  931_000,
 );
 
-// Adding a flat route does not rescue an unresolved progressive pair.
-const twoProgressivePlusFlat = multiEstimate([
+// Salary 5m + pension 15m (below 70): the 275,000 pension tax is final and
+// the salary surcharge is tested on 5m alone, not on 20m.
+const salaryPlusBigPension = multiEstimate(
+  [
+    { route: "salary", income: 5_000_000 },
+    { route: "pension", income: 15_000_000 },
+  ],
+  { pensionerAgeBelow70: true },
+);
+check(
+  "Pension tax stays final beside salary",
+  lineFor(salaryPlusBigPension, "pension").taxDue,
+  275_000,
+);
+check(
+  "Final and assessable splits are reported",
+  salaryPlusBigPension.finalTaxDue === 275_000 &&
+    salaryPlusBigPension.assessableTaxDue === 931_000,
+  true,
+);
+check(
+  "Salary surcharge ignores the final pension",
+  lineFor(salaryPlusBigPension, "salary").surcharge,
+  0,
+);
+check(
+  "Combined total is 1,206,000",
+  salaryPlusBigPension.taxDue,
+  1_206_000,
+);
+check(
+  "The note discloses the final-tax slice",
+  salaryPlusBigPension.note.includes("275,000 of this total is final tax"),
+  true,
+);
+
+// A pension taxed as salary IS salary-head income: 6m + 6m combine into 12m
+// at clause (2), 616,000 + 35% of 7.9m = 3,381,000 plus 9% surcharge.
+const salaryPlusWorkingPension = multiEstimate(
+  [
+    { route: "salary", income: 6_000_000 },
+    { route: "pension", income: 6_000_000 },
+  ],
+  { pensionTaxAsSalary: true },
+);
+check(
+  "Working pension joins the slab",
+  salaryPlusWorkingPension.breakdown.length,
+  1,
+);
+check(
+  "Combined base tax on 12m",
+  salaryPlusWorkingPension.baseTax,
+  3_381_000,
+);
+check(
+  "Combined 9% surcharge",
+  salaryPlusWorkingPension.surcharge,
+  304_290,
+);
+check(
+  "Combined total is 3,685,290",
+  salaryPlusWorkingPension.taxDue,
+  3_685_290,
+);
+check(
+  "The former-employer reference is cited",
+  salaryPlusWorkingPension.appliedRuleIds.includes(
+    "TY2026-149IA-PENSION-FORMER-EMPLOYER-OR-ASSOCIATE",
+  ),
+  true,
+);
+
+// A flat route prices beside the joint line as usual.
+const combinedPlusFlat = multiEstimate([
   { route: "salary", income: 8_000_000 },
   { route: "property_rent", income: 4_000_000 },
   {
@@ -766,9 +977,14 @@ const twoProgressivePlusFlat = multiEstimate([
   },
 ]);
 check(
-  "A flat route does not mask the open question",
-  twoProgressivePlusFlat.status,
-  "NEEDS_RULES",
+  "A flat route prices beside the joint line",
+  combinedPlusFlat.status,
+  "ESTIMATE",
+);
+check(
+  "Joint plus bank totals 5,094,100",
+  combinedPlusFlat.taxDue,
+  5_094_100,
 );
 
 // --- Withholding and refunds across a mixed return -------------------------

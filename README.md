@@ -2,124 +2,138 @@
 
 TaxRocket is a guided Pakistan tax-filing workspace built with Next.js. It helps a taxpayer move through profile setup, document review, bank-statement reconciliation, ledger preparation, tax estimation, filing-packet approval, and the FBR connection handoff.
 
-> **Status:** This repository is an MVP/redesign implementation. Some TY2026 tax rules are pilot estimates and must be reviewed before production tax filing. The FBR step currently prepares and gates the handoff to a local trusted desktop agent; it is not a complete FBR submission integration.
+> **Status:** Pilot. The tax engine implements **Tax Year 2026 only** (Finance Act 2025). TY2027 is hidden from the UI until its rules are implemented. The FBR step prepares and gates the handoff to a local trusted desktop agent; it is not a complete FBR API submission.
 
 ## Technology
 
-- Next.js 14.2.x
-- React 18
-- TypeScript
-- Tailwind CSS
+- Next.js 14.2.x, React 18, TypeScript, Tailwind CSS
 - Prisma 5 with PostgreSQL (Docker locally; PostgreSQL on the production VPS)
-- NextAuth with Google OAuth
-- Gemini AI for document/bank-data extraction and classification
+- NextAuth with Google OAuth (Google login only)
+- Gemini AI for document/bank-data extraction and classification (manual entry fallback exists)
 - PDFKit for filing packet PDFs
 - XLSX support for structured bank statements
+- Playwright for browser (UI) test suites
 
 ## Main filing flow
 
 1. Sign in with Google
-2. Complete taxpayer profile and filing setup
+2. Complete taxpayer profile and filing setup (Tax Year 2026)
 3. Upload and review required tax documents
 4. Extract and map document data
 5. Import or enter bank statements and transactions
 6. Maintain income, expense, asset, and liability ledger entries
 7. Resolve wealth reconciliation
-8. Calculate a route-specific TY2026 estimate where rules are available
-9. Generate and approve a versioned filing packet
-10. Start the FBR trusted-agent handoff after all approval gates pass
+8. Calculate a route-specific TY2026 estimate (salary, pension, rent, bank profit, dividend, services, business, capital gains, non-resident, other income, imports, advance tax)
+9. Confirm the withholding-duplicate check if raised, then approve a versioned filing packet
+10. Final submit gate (Submit / Not now), then the FBR trusted-agent handoff
 
 ## Requirements
 
-- Node.js 20.x or newer is recommended
-- npm
-- A Google OAuth application for login
-- A Gemini API key for AI extraction/classification features
+- **Node.js 20.x LTS** (Next 14 needs 18.18+; use 20 to match CI)
+- npm (ships with Node)
+- **PostgreSQL 16** running locally (recommended: `postgres:16` Docker container) + an empty `taxrocket` database
+- A **Google OAuth application** for login (web client; authorized redirect `http://localhost:3000/api/auth/callback/google` for local dev)
+- A **Gemini API key** (recommended; without it AI extraction is skipped and manual entry is used)
 
 ## Local setup
 
-Install dependencies:
-
 ```bash
+# 0. Get the code (clone, or download/extract the workspace with its .git folder)
+cd tax-rocket
+
+# 1. Check Node
+node --version        # want v20.x
+
+# 2. Install dependencies
 npm install
-```
 
-Create a `.env` file in the project root. Do not commit this file or share real credentials:
+# 3. Create .env in the project root (template below; never commit it)
 
-```env
-DATABASE_URL="postgresql://taxrocket:taxrocket_dev_password@localhost:5432/taxrocket"
-NEXTAUTH_URL="http://localhost:3000"
-NEXTAUTH_SECRET="replace-with-a-long-random-secret"
-GOOGLE_CLIENT_ID=""
-GOOGLE_CLIENT_SECRET=""
-GEMINI_API_KEY=""
-GEMINI_MODEL="gemini-3.5-flash"
-```
+# 4. Create the database (once), with Postgres running:
+#    CREATE DATABASE taxrocket;
 
-Generate the Prisma client:
-
-```bash
+# 5. Generate the client and apply the checked-in migrations
 npx prisma generate
-```
-
-Create/update the local PostgreSQL database using the checked-in migrations. PostgreSQL must be running locally (the recommended setup is the `postgres:16` Docker container):
-
-```bash
 npx prisma migrate deploy
-```
+npx prisma migrate status     # should report "up to date"
 
-Use `migrate deploy`, not `migrate dev`. The migration history is already
-written and committed; `migrate dev` tries to author a new migration, needs a
-shadow database, and fails outright on a non-interactive shell. `deploy`
-applies exactly the nine committed migrations and nothing else.
-
-Check migration status:
-
-```bash
-npx prisma migrate status
-```
-
-Start the development server:
-
-```bash
+# 6. Start the dev server
 npm run dev
 ```
 
 Then open [http://localhost:3000](http://localhost:3000).
 
-## Database deployment plan — completed
+Use `migrate deploy`, not `migrate dev`. The migration history is already written and committed; `migrate dev` tries to author a new migration, needs a shadow database, and fails on a non-interactive shell. `deploy` applies exactly the committed migrations and nothing else.
 
-Development and production now use PostgreSQL. Local development uses the `postgres:16` Docker container; production will use PostgreSQL on the Hostinger VPS.
+### `.env` template
 
-The SQLite test database was intentionally not transferred. A fresh PostgreSQL migration history is checked in under `prisma/migrations/`, and the local migration has been verified with:
-
-```bash
-npx prisma migrate status
+```env
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/taxrocket"
+NEXTAUTH_URL="http://localhost:3000"
+NEXTAUTH_SECRET="replace-with-output-of-openssl-rand-base64-32"
+GOOGLE_CLIENT_ID=""
+GOOGLE_CLIENT_SECRET=""
+GEMINI_API_KEY=""
+GEMINI_MODEL="gemini-3.5-flash"
+FBR_USE_MOCK_IRIS="true"
 ```
 
-At production deployment, set the VPS `DATABASE_URL` to the production PostgreSQL URL and apply the committed schema:
+- `NEXTAUTH_SECRET`: generate with `openssl rand -base64 32` (Git Bash ships openssl on Windows).
+- Google callback URL in Google Cloud Console must be `http://localhost:3000/api/auth/callback/google`.
+- `FBR_USE_MOCK_IRIS="true"` points the desktop-agent flow at the local mock IRIS pages under `electron-connect/mock-iris/` instead of the real portal.
+
+## Verification suites
+
+Offline suites (no database needed):
 
 ```bash
-npx prisma migrate deploy
+npm run verify:ty2026-rates
+npm run verify:ty2026-data-model
+npm run verify:ty2026-filer-status
+npm run verify:ty2026-subcategories
+npm run verify:ty2026-tax-calculation
+npm run verify:flat-income-routes
+npm run verify:advance-tax
+npm run verify:tax-breakdown-surfacing
+npm run verify:money-precision
+npm run verify:upload-safety
+npm run verify:route-protection
+npm run verify:dependency-health
+npm run verify:cleanup-hygiene
+```
+
+Database-backed suites (need `DATABASE_URL` + migrated DB):
+
+```bash
+npm run verify:withholding-sources
+npm run verify:money-database
+npm run verify:bank-statement-isolation
+```
+
+`npm run verify:all` runs the offline + database suites in one go.
+
+Browser suites (need the dev server running, a migrated DB, and Playwright browsers):
+
+```bash
+npx playwright install        # once per machine
+npm run verify:ui             # auth + wizard + calculation + security
+```
+
+Type check:
+
+```bash
+npx tsc --noEmit
+```
+
+## Production build & deploy (VPS)
+
+```bash
 npx prisma generate
 npm run build
 npm start
 ```
 
-The provider is already `postgresql` in `prisma/schema.prisma`, so no SQLite-to-PostgreSQL conversion is needed at deployment time. Do not run `prisma migrate reset` in production.
-
-## Production build verification
-
-```bash
-npm run build
-npm run start
-```
-
-If dependencies were installed with `npm ci --ignore-scripts`, Prisma generation is skipped. Run this before building:
-
-```bash
-npx prisma generate
-```
+On the VPS: set `DATABASE_URL` to the production PostgreSQL URL, run `npx prisma migrate deploy`, then build and start. Never run `prisma migrate reset` in production. If dependencies were installed with `npm ci --ignore-scripts`, run `npx prisma generate` before building.
 
 ## Available scripts
 
@@ -128,54 +142,45 @@ npm run dev       # Start the development server
 npm run build     # Create an optimized production build
 npm run start     # Start the production server
 npm run lint      # Run the configured lint command
-npm run db:generate # Generate the Prisma client
-npm run db:migrate  # Run local development migrations
-npm run db:deploy   # Apply committed migrations in production
-npm run db:status   # Show migration status
+npm run verify:all  # All offline + database suites
+npm run verify:ui   # All four Playwright browser suites
+npm run check:oauth         # Diagnose Google OAuth callback config
+npm run diagnose:withholding  # Inspect withholding-source resolution
 ```
 
-Database commands used during deployment:
+Individual `verify:*` suites are listed in the Verification section above; every suite also exists as its own `verify:<name>` script in `package.json`.
 
-```bash
-npx prisma generate       # Generate the Prisma client
-npx prisma migrate dev    # Local development migrations
-npx prisma migrate deploy # Apply committed migrations in production
-```
+## Desktop agent (separate app)
+
+The FBR filing agent is an Electron desktop app living in `electron-connect/` with its own `package.json`. It is built and installed independently:
+
+- Build instructions: `INSTALLER_BUILD.md`
+- Agent docs: `electron-connect/README.md`
+- Running, updating, or reinstalling the **web app never touches an already-installed agent** — they are separate processes; the agent only talks to the web app over localhost during a filing session.
+
+## Tax-rule scope
+
+- Engine: TY2026 (July 2025 – June 2026, Finance Act 2025) only. TY2027 is removed from `SUPPORTED_TAX_YEARS` until its rules are implemented.
+- 152 rate-card rules catalogued; advance tax 27/27 priced; imports, mobile bands, late filer, pension 70+, and aggregation (75% salary test) implemented and pinned by suites.
+- Anything without a confirmed rule refuses with `NEEDS_RULES` instead of guessing. Rule history and decisions: `NEEDS_RULES_IMPLEMENTATION.md`.
 
 ## Remaining production work
 
-The database migration is complete. Before accepting real tax filings, the following items still require a focused review:
+Before accepting real tax filings, these still need attention:
 
-1. Security and ownership audit for every document, packet, and server action.
-2. FBR submission integration; the current FBR step is a trusted desktop-agent handoff, not a complete FBR API submission.
-3. Persistent document/PDF storage, backups, and secure file serving.
-4. Confirmed, versioned FBR tax rules for routes currently returning `NEEDS_RULES`.
-5. Money precision review; current monetary fields use `Float` and may need `Decimal`.
-6. Automated tests for approval gates, ownership, reconciliation, tax calculation, and packet versioning.
-7. Dependency vulnerability review without using `npm audit fix --force`.
-8. VPS hardening, HTTPS, OAuth production callback configuration, and backup/restore testing.
+1. Persistent object storage (files/packets are on local disk — fine for one VPS, not for serverless/multi-instance).
+2. Rate-limit coverage (currently 3/18 server actions).
+3. Calculation history/audit trail (recalculation replaces lines) and revised-return support (one draft per user per year).
+4. Final FBR submission spec beyond the supervised agent handoff.
+5. Client confirmation of the two Sukuk boundary notes and the adjustable/final defaults (safe defaults are live).
+6. VPS hardening, HTTPS, OAuth production callback, backup/restore testing.
 
 ## Environment notes
 
 - `NEXTAUTH_URL` must be the actual URL, not a Markdown link.
 - `NEXTAUTH_SECRET` should be a strong secret in every non-local environment.
 - Google OAuth callback URLs must match the environment URL configured in Google Cloud.
-- Gemini extraction/classification requires `GEMINI_API_KEY`.
-- Uploaded files and generated packets currently use local filesystem storage under the application directory. A persistent object-storage provider should be used before deploying to a serverless or multi-instance environment.
-
-## Tax-rule scope
-
-The current tax engine includes pilot TY2026 routes for selected salary, pension, rental, and bank-profit cases. It explicitly reports `NEEDS_RULES` where a route is not sufficiently implemented. Credits, surcharge, perquisites, deductions, and several advanced income routes still require confirmed, versioned FBR rules and professional review.
-
-## Security and dependency maintenance
-
-Review dependency advisories regularly:
-
-```bash
-npm audit
-```
-
-Avoid running `npm audit fix --force` without reviewing the resulting major-version changes. The project uses server actions, authentication, file uploads, Prisma, and spreadsheet parsing, so dependency upgrades should be followed by a full build and workflow verification.
+- Without `GEMINI_API_KEY`, extraction falls back to manual entry (UX still works).
 
 ## Project structure
 
@@ -183,6 +188,22 @@ Avoid running `npm audit fix --force` without reviewing the resulting major-vers
 app/                         Next.js routes and server actions
 components/                  UI and filing workflow components
 lib/tax/                     Tax rules, calculations, eligibility, and filing state
+lib/tax/rules/ty2026/        TY2026 rate-card catalog + subcategories
 prisma/schema.prisma         Database schema
 prisma/migrations/           Checked-in PostgreSQL migrations
+scripts/                     verify:* suites (offline + DB) and diagnostics
+scripts/ui/                  Playwright browser suites
+electron-connect/            FBR desktop agent (separate Electron app)
+test-documents/              Sample fixtures for manual upload testing
+NEEDS_RULES_IMPLEMENTATION.md  Tax-rule decision + change log (§1–§17)
+```
+
+## Git workflow
+
+```bash
+git status
+git add -A            # .gitignore already excludes node_modules/.env/.next
+git commit -m "..."
+git pull --rebase origin main
+git push origin main  # plain push only appends history; never --force
 ```

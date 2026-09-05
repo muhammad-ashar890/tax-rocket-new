@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getRequiredTaxDocumentTypesForCurrentFlow } from "@/lib/tax/document-requirements";
 import { sumMoney, toMoneyNumberOrNull } from "@/lib/money";
+import { getWithholdingDuplicateWarning } from "@/lib/tax/withholding-sources";
 
 async function getOwnedDraft(draftId: string) {
   const session = await getServerSession(authOptions);
@@ -89,7 +90,7 @@ export async function getFilingSummaryAction(draftId: string) {
 
     // Decimal columns arrive as Prisma Decimal instances; the wizard needs
     // plain numbers.
-    const taxBreakdown = calculationLines.map((line) => {
+    const allBreakdown = calculationLines.map((line) => {
       let details: { rateShape?: string; isFinalTax?: boolean } = {};
       try {
         details = JSON.parse(line.detailsJson);
@@ -109,6 +110,21 @@ export async function getFilingSummaryAction(draftId: string) {
         rateShape: details.rateShape ?? "PROGRESSIVE",
       };
     });
+
+    // Collection lines (imports, advance tax) price tax already collected at
+    // source. They are reported in their own section with their own subtotal
+    // so the income-tax totals stay exactly what the engine computed.
+    const COLLECTION_SOURCES = new Set(["imports", "advance_tax"]);
+    const taxBreakdown = allBreakdown.filter(
+      (line) => !COLLECTION_SOURCES.has(line.source),
+    );
+    const collectionBreakdown = allBreakdown.filter((line) =>
+      COLLECTION_SOURCES.has(line.source),
+    );
+    const collectionTaxDue = collectionBreakdown.reduce(
+      (total, line) => total + line.taxDue,
+      0,
+    );
 
     const finalTaxDue = taxBreakdown
       .filter((line) => line.isFinalTax)
@@ -171,6 +187,14 @@ export async function getFilingSummaryAction(draftId: string) {
       liabilities: totalFor("LIABILITY"),
     };
 
+    // Fresh on every summary load (mount, ledger change, recalculation) so a
+    // page reload can never strand the wizard: the duplicate confirmation
+    // follows the current warning, not session memory.
+    const duplicateWarning = await getWithholdingDuplicateWarning(
+      draft.id,
+      draft.userId,
+    );
+
     return {
       success: true,
       summary: {
@@ -193,9 +217,12 @@ export async function getFilingSummaryAction(draftId: string) {
         taxCalculationStatus:
           currentDraft?.taxCalculationStatus ?? "NOT_CALCULATED",
         taxpayerListStatus: currentDraft?.taxpayerListStatus ?? null,
+        withholdingWarning: duplicateWarning,
         taxBreakdown,
         finalTaxDue,
         assessableTaxDue,
+        collectionBreakdown,
+        collectionTaxDue,
       },
     };
   } catch (error) {

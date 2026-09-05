@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Download, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -43,6 +44,8 @@ const SOURCE_LABELS: Record<string, string> = {
   business: "Business income",
   dividend: "Dividend",
   foreign_income_assets: "Non-Resident",
+  imports: "Imports",
+  advance_tax: "Advance tax",
 };
 
 function sourceLabel(source: string) {
@@ -67,6 +70,8 @@ type WizardPacketStepProps = Readonly<{
   packetError: string | null;
   onGeneratePacket: () => void;
   onGeneratePdf: () => void;
+  irisLoginConfirmed: boolean;
+  onIrisLoginChange: (checked: boolean) => void;
 }>;
 
 export function WizardPacketStep({
@@ -78,6 +83,8 @@ export function WizardPacketStep({
   packetError,
   onGeneratePacket,
   onGeneratePdf,
+  irisLoginConfirmed,
+  onIrisLoginChange,
 }: WizardPacketStepProps) {
   const taxCalculationReady =
     filingSummary?.taxCalculationStatus === "ESTIMATE";
@@ -310,6 +317,41 @@ export function WizardPacketStep({
           Approval can now be reviewed against this exact version.
         </div>
       )}
+
+      <div
+        className={`rounded-xl border p-4 transition-colors ${
+          irisLoginConfirmed
+            ? "border-[#376952] bg-white shadow-sm"
+            : "border-gray-200 bg-white"
+        }`}
+      >
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={irisLoginConfirmed}
+            onChange={(e) => onIrisLoginChange(e.target.checked)}
+            className="mt-0.5 h-5 w-5 shrink-0 accent-[#376952]"
+          />
+          <div>
+            <p className="text-sm font-medium text-gray-700">
+              I have created my FBR Iris login{" "}
+              <span className="text-red-500">*</span>
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-gray-500">
+              Required before FBR Connect - the desktop agent can only file
+              with your own Iris credentials. No login yet? Create it first
+              via the{" "}
+              <Link
+                href="/tax/guide#ntn-cnic"
+                className="font-medium text-[#376952] hover:underline"
+              >
+                NTN / CNIC Guide
+              </Link>
+              .
+            </p>
+          </div>
+        </label>
+      </div>
     </div>
   );
 }

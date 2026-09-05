@@ -386,6 +386,22 @@ export async function resumeJobAfterPauseAction(
       ""
     ).toLowerCase();
 
+    // Final-submit gate: the agent pauses here before pressing Submit in
+    // IRIS. A generic resume must never cross it — only the explicit gate
+    // choice in the web UI carries finalSubmitConfirmed, so a direct action
+    // call or a stale Continue button cannot submit the return.
+    const awaitingFinalSubmit =
+      requiredAction.includes("final_review") ||
+      requiredAction.includes("final_submit") ||
+      requiredAction.includes("classic_final");
+    if (awaitingFinalSubmit && resumeData?.finalSubmitConfirmed !== true) {
+      return {
+        success: false,
+        error:
+          "This return is at the final submit gate. Choose Submit to FBR or Not now on the filing screen.",
+      };
+    }
+
     // Map action to next phase (same as old reference)
     function getNextPhase(action: string, curPhase: string): string {
       const a = action.toLowerCase();

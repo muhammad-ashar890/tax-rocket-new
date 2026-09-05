@@ -240,7 +240,7 @@ export async function updateUserProfile(data: {
     if (taxYear !== null && !isSupportedTaxYear(taxYear)) {
       return {
         success: false,
-        error: "Only Tax Years 2026 and 2027 are currently supported",
+        error: "Only Tax Year 2026 is currently supported",
       };
     }
 

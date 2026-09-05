@@ -224,15 +224,15 @@ export function SiteHeader() {
                     </DropdownMenuContent>
                   </DropdownMenu>
 
-                  {/* Help */}
-                  <button
-                    type="button"
+                  {/* Help — opens the Guide page */}
+                  <Link
+                    href="/tax/guide"
                     aria-label="Help"
-                    title="Coming soon"
-                    className="flex h-9 w-9 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-500"
+                    title="Help & Guide"
+                    className="flex h-9 w-9 items-center justify-center rounded-full text-[#376952] transition-colors hover:bg-[#376952]/10"
                   >
                     <HelpCircle className="h-[18px] w-[18px]" />
-                  </button>
+                  </Link>
 
                   {/* Profile dropdown */}
                   <DropdownMenu>

@@ -2,14 +2,13 @@
 
 import {
   BadgeDollarSign,
+  BadgePercent,
   Banknote,
   Briefcase,
   BriefcaseBusiness,
   Building2,
   CheckCircle2,
-  CircleDot,
   Coins,
-  CreditCard,
   FileText,
   HandCoins,
   Handshake,
@@ -17,10 +16,10 @@ import {
   LaptopMinimal,
   Leaf,
   Link2,
-  Mail,
   ReceiptText,
   Route,
   ScrollText,
+  Ship,
   UserRound,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -98,6 +97,8 @@ const incomeSourceOptions: ReadonlyArray<{
     icon: ReceiptText,
   },
   { value: "other_income", label: "Other Income", icon: FileText },
+  { value: "imports", label: "Imports", icon: Ship },
+  { value: "advance_tax", label: "Advance Tax", icon: BadgePercent },
 ];
 
 const readinessOptions: ReadonlyArray<{
@@ -105,9 +106,6 @@ const readinessOptions: ReadonlyArray<{
   label: string;
   icon: LucideIcon;
 }> = [
-  { value: "cnic_ntn_ready", label: "CNIC / NTN", icon: CreditCard },
-  { value: "iris_credentials_ready", label: "Iris Login", icon: CircleDot },
-  { value: "mobile_email_ready", label: "Mobile / Email", icon: Mail },
   {
     value: "previous_return_available",
     label: "Previous Return",
@@ -392,7 +390,7 @@ export function WizardSetupStep({
       <div className="space-y-6">
         <StepHeading
           title="What do you already have ready?"
-          description="Tap what applies — no worries if something's missing."
+          description="Tap each card to confirm - everything here is needed to continue."
         />
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {readinessOptions.map((item) => {

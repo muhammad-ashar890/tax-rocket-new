@@ -1,4 +1,7 @@
-export const SUPPORTED_TAX_YEARS = [2026, 2027] as const;
+// Pilot goes live on TY2026 only. Add 2027 back here (with its rule set)
+// when the TY2027 rules are implemented — every selector, default and server
+// guard reads this list.
+export const SUPPORTED_TAX_YEARS = [2026] as const;
 
 export function isSupportedTaxYear(taxYear: number): boolean {
   return (SUPPORTED_TAX_YEARS as readonly number[]).includes(taxYear);

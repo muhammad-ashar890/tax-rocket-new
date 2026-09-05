@@ -40,6 +40,11 @@ export function useFilingFinalization({
   const [withholdingWarning, setWithholdingWarning] = useState<string | null>(
     null,
   );
+  // The user's explicit confirmation that the flagged ledger rows are
+  // separate payments. Session state only: the persisted proof is the packet
+  // approval itself, which the server refuses while a warning stands
+  // unconfirmed. Reset on every recalculation, like the approval.
+  const [withholdingConfirmed, setWithholdingConfirmed] = useState(false);
   const [taxCalculationError, setTaxCalculationError] = useState<string | null>(
     null,
   );
@@ -82,7 +87,11 @@ export function useFilingFinalization({
     }
 
     setSavingDraft(true);
-    const result = await confirmFilingForPacketAction(draftId, checked);
+    const result = await confirmFilingForPacketAction(
+      draftId,
+      checked,
+      withholdingConfirmed,
+    );
     setSavingDraft(false);
 
     if (!result.success) {
@@ -138,6 +147,7 @@ export function useFilingFinalization({
     setCalculatingTaxFor(status);
     setTaxCalculationError(null);
     setWithholdingWarning(null);
+    setWithholdingConfirmed(false);
     const result = await calculateTaxAction(draftId, status);
     setCalculatingTaxFor(null);
 
@@ -167,6 +177,7 @@ export function useFilingFinalization({
     calculatingTaxFor,
     taxCalculationError,
     withholdingWarning,
+    withholdingConfirmed,
     filingPacket,
     generatingPacket,
     generatingPdf,
@@ -174,6 +185,8 @@ export function useFilingFinalization({
     setApprovalConfirmed,
     setTaxCalculatedInSession,
     setFilingPacket,
+    setWithholdingWarning,
+    setWithholdingConfirmed,
     handleApprovalChange,
     handleGeneratePacket,
     handleGeneratePacketPdf,

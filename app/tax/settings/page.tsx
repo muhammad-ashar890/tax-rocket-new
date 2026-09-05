@@ -91,7 +91,6 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("notifications");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
   const [sessionInfo, setSessionInfo] = useState<{
     name: string | null;
     email: string;
@@ -112,7 +111,6 @@ export default function SettingsPage() {
     taxYear: "2026",
     currency: "PKR",
     autoGeneratePackets: false,
-    autoAdvanceStatus: false,
   });
 
   useEffect(() => {
@@ -128,9 +126,7 @@ export default function SettingsPage() {
         setPractice((previous) => ({
           ...previous,
           ...result.settings.practice,
-          autoAdvanceStatus: false,
         }));
-        setTwoFactorEnabled(result.settings.twoFactorEnabled);
       }
     });
 
@@ -156,7 +152,6 @@ export default function SettingsPage() {
     const result = await updateUserSettingsAction({
       notifications,
       practice,
-      twoFactorEnabled,
     });
     setSaving(false);
 

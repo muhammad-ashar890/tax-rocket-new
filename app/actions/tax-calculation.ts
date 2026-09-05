@@ -17,44 +17,21 @@ import {
 } from "@/lib/tax/tax-data-model";
 import type { TaxpayerListStatus } from "@/lib/tax/tax-data-model";
 import { assessPensionerAge } from "@/lib/tax/taxpayer-age";
+import { isTaxActivitySource } from "@/lib/tax/filing-drafts";
 import { getTy2026RateCardRule } from "@/lib/tax/rules/ty2026";
+import {
+  getTy2026SubcategoryDetailFields,
+  parsePersistedSelectionUserDetails,
+} from "@/lib/tax/rules/ty2026/subcategories";
+import type { Ty2026SelectionUserDetails } from "@/lib/tax/rules/ty2026/subcategories";
 import { validateAuthoritativeReconciliation } from "@/lib/tax/reconciliation-calculation";
 import {
+  extractMappedSalaryWithholding,
   normalizeLedgerCategory,
   resolveTaxWithheld,
 } from "@/lib/tax/withholding-sources";
 import { createNotification } from "@/app/actions/notifications";
 import { sumMoney, toMoneyAmount } from "@/lib/money";
-
-function parseExtractedNumber(value: unknown) {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  const text = String(value ?? "").trim();
-  if (!text) return null;
-  const parsed = Number(text.replace(/[^0-9.-]/g, ""));
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function extractMappedSalaryWithholding(extractedData: string | null) {
-  if (!extractedData) return null;
-  try {
-    const payload = JSON.parse(extractedData) as {
-      fields?: Array<{ label?: unknown; value?: unknown }>;
-    };
-    const field = payload.fields?.find((item) => {
-      const label = String(item.label ?? "")
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_");
-      return (
-        label.includes("tax_deducted") ||
-        label.includes("tax_withheld") ||
-        label.includes("income_tax_deducted")
-      );
-    });
-    return parseExtractedNumber(field?.value);
-  } catch {
-    return null;
-  }
-}
 
 async function getOwnedDraft(draftId: string) {
   const session = await getServerSession(authOptions);
@@ -83,7 +60,7 @@ async function getOwnedDraft(draftId: string) {
       taxWithheld: true,
       incomeSelections: {
         where: { status: "SELECTED" },
-        select: { source: true, subcategory: true },
+        select: { source: true, subcategory: true, detailsJson: true },
       },
     },
   });
@@ -239,11 +216,21 @@ export async function calculateTaxAction(
     // different or additional subcategory must return NEEDS_RULES rather than
     // silently applying a bank-deposit/rental/salary formula to the wrong row.
     const selectedSubcategories = new Map<string, Set<string>>();
+    const selectionDetails = new Map<string, Ty2026SelectionUserDetails>();
     for (const selection of draft.incomeSelections) {
       const sourceSelections =
         selectedSubcategories.get(selection.source) ?? new Set<string>();
       sourceSelections.add(selection.subcategory);
       selectedSubcategories.set(selection.source, sourceSelections);
+      const details = parsePersistedSelectionUserDetails(
+        selection.detailsJson,
+      );
+      if (details) {
+        selectionDetails.set(
+          `${selection.source}\u0000${selection.subcategory}`,
+          details,
+        );
+      }
     }
     const hasOnlySubcategories = (
       source: string,
@@ -277,7 +264,13 @@ export async function calculateTaxAction(
       hasOnlySubcategories("pension", [
         "pension-up-to-10m",
         "pension-above-10m-below-age-70",
+        "former-employer-or-associate",
       ]);
+    // The former-employer row references Section 149, so the whole pension
+    // is priced on the salary slabs when it is selected.
+    const pensionTaxAsSalary = (
+      selectedSubcategories.get("pension") ?? new Set<string>()
+    ).has("former-employer-or-associate");
 
     // Age is derived from the taxpayer's recorded date of birth rather than
     // from the selected subcategory, so the age condition is evidence-based.
@@ -367,12 +360,88 @@ export async function calculateTaxAction(
         continue;
       }
 
+      const details = selectionDetails.get(
+        `${entry.source}\u0000${selected[0]}`,
+      );
       flatRouteSources.push({
         route: entry.route,
         income: entry.income,
         subcategory: selected[0],
+        // The composite mutual-fund row prices its declared debt/equity
+        // split; every other flat row prices from the ledger amount alone.
+        ...(entry.source === "dividend" &&
+        selected[0] === "mutual-fund-proportional"
+          ? {
+              attributes: {
+                debtPortion: details?.debtPortion,
+                equityPortion: details?.equityPortion,
+              },
+            }
+          : {}),
       });
       routedFlatSourceNames.add(entry.source);
+    }
+
+    /**
+     * Activity routes: imports and advance tax. Unlike income routes, each
+     * selection carries its own declared figures, so several categories
+     * under one source never need a ledger split — every card prices its
+     * own transaction. Required figures are enforced here against the same
+     * field contract the wizard renders.
+     */
+    const activitySources: TaxIncomeSource[] = [];
+    const activityDetailProblems: string[] = [];
+    const routedActivitySourceNames = new Set<string>();
+
+    for (const source of incomeSources.filter(isTaxActivitySource)) {
+      const selected = Array.from(
+        selectedSubcategories.get(source) ?? new Set<string>(),
+      );
+      if (selected.length === 0) continue;
+      routedActivitySourceNames.add(source);
+
+      for (const subcategory of selected) {
+        const details =
+          selectionDetails.get(`${source}\u0000${subcategory}`) ?? {};
+        const missing = getTy2026SubcategoryDetailFields(source, subcategory)
+          .filter((field) => {
+            if (!field.required) return false;
+            const value = details[field.key];
+            // A yes/no answer counts once given, either way; numbers must
+            // additionally clear the field floor.
+            if (field.checkbox === true) return value === undefined;
+            return (
+              value === undefined ||
+              typeof value !== "number" ||
+              value < field.min
+            );
+          })
+          .map((field) =>
+            details[field.key] === undefined
+              ? field.label
+              : `${field.label} (minimum ${field.min})`,
+          );
+        if (missing.length > 0) {
+          activityDetailProblems.push(
+            `${source}/${subcategory}: enter ${missing.join(", ")}`,
+          );
+          continue;
+        }
+        activitySources.push({
+          route: source,
+          income: details.amount ?? 0,
+          subcategory,
+          attributes: {
+            engineCapacityCc: details.engineCapacityCc,
+            seatCount: details.seatCount,
+            ladenWeightKg: details.ladenWeightKg,
+            unitQuantity: details.unitQuantity,
+            cfValueUsd: details.cfValueUsd,
+            isSmartphone: details.isSmartphone,
+            vehicleAgeYears: details.vehicleAgeYears,
+          },
+        });
+      }
     }
 
     // Section 149 withholding, read from the mapped salary certificate. The
@@ -423,6 +492,7 @@ export async function calculateTaxAction(
       });
     }
     routedIncomeSources.push(...flatRouteSources);
+    routedIncomeSources.push(...activitySources);
 
     // A selected source with no implemented route must stop the estimate. If
     // it were ignored, its income would be absorbed into the salary remainder
@@ -432,6 +502,9 @@ export async function calculateTaxAction(
     if (isPensionRoute) routedSourceNames.add("pension");
     if (isRentalRoute) routedSourceNames.add("property_rent");
     for (const source of routedFlatSourceNames) routedSourceNames.add(source);
+    for (const source of routedActivitySourceNames) {
+      routedSourceNames.add(source);
+    }
 
     const unroutedSources = incomeSources.filter(
       (source) => !routedSourceNames.has(source),
@@ -453,11 +526,19 @@ export async function calculateTaxAction(
       isBankProfitRoute,
       pensionerAgeBelow70: pensionerAge.isBelow70,
       pensionerAgeReason: pensionerAge.reason,
+      // isBelow70 is false for 70+ and unknown alike (turns-70 counts as
+      // below-70 under the confirmed first-day rule), so the exemption
+      // needs its own confirmed signal: 70 for the whole year.
+      pensionerAge70OrAbove:
+        pensionerAge.bracket === "SEVENTY_OR_ABOVE",
+      pensionTaxAsSalary,
       rentalRecipientKind,
     });
 
     const blockedNote =
-      flatRoutesNeedingSplit.length > 0
+      activityDetailProblems.length > 0
+        ? `This filing is missing figures for ${activityDetailProblems.join(" · ")}. Open the category step, enter the missing figures, save, and recalculate.`
+        : flatRoutesNeedingSplit.length > 0
         ? `This filing selects more than one category under ${flatRoutesNeedingSplit.join(", ")}, and each category is charged at its own rate. The ledger records a single amount per source, so there is no evidence for how the income divides between those categories. Record the income as separate ledger entries per category, or select a single category, and recalculate.`
         : unroutedSources.length > 0
           ? `This filing selects ${unroutedSources.join(", ")}, for which no TY2026 route is implemented yet. Confirmed rules are required before those sources can be included in an estimate.`
@@ -477,6 +558,8 @@ export async function calculateTaxAction(
           breakdown: [],
           finalTaxDue: 0,
           assessableTaxDue: 0,
+          collectionBreakdown: [],
+          collectionTaxDue: 0,
           note: blockedNote,
         }
       : estimate;
@@ -487,7 +570,10 @@ export async function calculateTaxAction(
     // Persist the per-route breakdown as an audit trail. Each recalculation
     // writes a new revision, so an approved packet can always be re-read
     // against the exact lines that produced its totals.
-    const calculationLines = result.breakdown.map((line) => {
+    // Both income lines and collection lines persist to the audit table; the
+    // filing summary splits them back apart for display.
+    const pricedLines = [...result.breakdown, ...result.collectionBreakdown];
+    const calculationLines = pricedLines.map((line) => {
       const primaryRule = line.appliedRuleIds[0]
         ? getTy2026RateCardRule(line.appliedRuleIds[0])
         : null;

@@ -1,12 +1,8 @@
 import { useEffect, useState } from "react";
-import { CheckSquare, ShieldCheck, Download, Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { CheckSquare, ShieldCheck } from "lucide-react";
 
 export function ApprovalPacket({
-  draftId,
-  onCancel,
   onApprovalChange,
-  showGenerateButton = true,
   initialApproved = false,
   packetVersion = 1,
   prePacketApproval = false,
@@ -14,12 +10,9 @@ export function ApprovalPacket({
   approvalReady = true,
   approvalBlockers = [],
 }: {
-  draftId?: string;
-  onCancel?: () => void;
   onApprovalChange?: (
     isApproved: boolean,
   ) => boolean | void | Promise<boolean | void>;
-  showGenerateButton?: boolean;
   initialApproved?: boolean;
   packetVersion?: number;
   prePacketApproval?: boolean;
@@ -32,19 +25,7 @@ export function ApprovalPacket({
   useEffect(() => {
     setIsApproved(initialApproved);
   }, [initialApproved]);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingApproval, setIsSavingApproval] = useState(false);
-
-  const handleGeneratePacket = async () => {
-    if (!isApproved) return;
-    setIsGenerating(true);
-    // Simulate generation delay
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    setIsGenerating(false);
-    // Here logic for actual PDF download would go
-    alert(`Packet PDF generated successfully for draft ${draftId}! (Demo)`);
-    if (onCancel) onCancel();
-  };
 
   const handleChange = async (checked: boolean) => {
     const previousValue = isApproved;
@@ -71,7 +52,7 @@ export function ApprovalPacket({
         <h2 className="text-lg font-semibold text-gray-800">
           {prePacketApproval
             ? "Approve for Packet Generation"
-            : `Final Approval ${showGenerateButton ? "& Generation" : ""}`}
+            : "Final Approval"}
         </h2>
       </div>
 
@@ -79,8 +60,6 @@ export function ApprovalPacket({
         {prePacketApproval
           ? "Review and approve the filing data before the final packet is generated."
           : "Please review and approve the packet."}{" "}
-        {showGenerateButton &&
-          "Generating the packet will download a PDF of your complete filing."}
       </p>
 
       {!approvalReady && !approvalLocked && (
@@ -139,28 +118,6 @@ export function ApprovalPacket({
         </label>
       </div>
 
-      {/* Generate Action inline (Only shown if enabled, e.g. from Filings list page) */}
-      {showGenerateButton && (
-        <div className="mt-5 flex justify-end gap-3">
-          <Button
-            disabled={!isApproved || isGenerating}
-            onClick={handleGeneratePacket}
-            className="bg-[#376952] hover:bg-[#2e5a44] text-white"
-          >
-            {isGenerating ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Generating PDF...
-              </>
-            ) : (
-              <>
-                <Download className="mr-2 h-4 w-4" />
-                Generate Packet PDF
-              </>
-            )}
-          </Button>
-        </div>
-      )}
     </div>
   );
 }

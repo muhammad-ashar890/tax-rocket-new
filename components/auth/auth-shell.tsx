@@ -1,5 +1,5 @@
 import type React from "react";
-import { Check, Sparkles } from "lucide-react";
+import { Check } from "lucide-react";
 
 /**
  * AuthShell — shared visual frame for /login and /signup.
@@ -33,11 +33,6 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
           <div className="pointer-events-none absolute -bottom-28 -right-16 h-80 w-80 rounded-full bg-white/10 blur-3xl" />
 
           <div className="relative">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium">
-              <Sparkles className="h-3 w-3" />
-              Redesign Demo
-            </span>
-
             <h2 className="mt-8 text-3xl font-bold leading-tight xl:text-4xl">
               Guided FBR filing,
               <br />

@@ -55,7 +55,6 @@ model User {
   defaultTaxYear            Int?
   notificationPreferences   String                     @default("{}")
   practicePreferences       String                     @default("{}")
-  twoFactorEnabled          Boolean                    @default(false)
   accounts                  Account[]
   sessions                  Session[]
   filings                   FilingDraft[]

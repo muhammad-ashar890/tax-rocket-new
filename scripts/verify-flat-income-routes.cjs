@@ -365,11 +365,74 @@ for (const [route, subcategory, income, atlTax, nonAtlTax] of RATE_CASES) {
 }
 
 // ---------------------------------------------------------------------------
+// 1b — collection routes: Section 148 imports (rate card page 1)
+//
+// Columns: subcategory, import value, ATL collection, Non-ATL collection.
+// Imports ride the same flat dispatch as the income routes above, but the
+// line lands in collectionBreakdown with the income-tax totals left at zero:
+// the amount was already collected at the customs stage.
+// ---------------------------------------------------------------------------
+
+const IMPORT_COLLECTION_CASES = [
+  // 1% / 2% — Part-I goods
+  ["part-i", 2_000_000, 20_000, 40_000],
+  // 2% / 4% — Part-II goods
+  ["part-ii", 2_000_000, 40_000, 80_000],
+  // 3.5% / 7% — Part-II goods, commercial importer
+  ["part-ii-commercial", 2_000_000, 70_000, 140_000],
+  // 5.5% / 11% — Part-III goods
+  ["part-iii", 2_000_000, 110_000, 220_000],
+  // 6% / 12% — Part-III goods, commercial importer
+  ["part-iii-commercial", 2_000_000, 120_000, 240_000],
+  // 1% / 2% — SRO 1125 manufacturer
+  ["sro-1125-manufacturer", 2_000_000, 20_000, 40_000],
+  // 4% / 8% — pharmaceutical products
+  ["pharma", 2_000_000, 80_000, 160_000],
+  // 1% / 2% — EV CKD kits
+  ["ev-ckd", 2_000_000, 20_000, 40_000],
+];
+
+for (const [subcategory, income, atlTax, nonAtlTax] of IMPORT_COLLECTION_CASES) {
+  for (const [status, expectedTax] of [
+    ["ATL", atlTax],
+    ["NON_ATL", nonAtlTax],
+  ]) {
+    const result = estimate(
+      [{ route: "imports", income, subcategory }],
+      status,
+    );
+    const label = `imports/${subcategory} @ ${income.toLocaleString()} ${status}`;
+
+    check(`${label} produces an estimate`, result.status, "ESTIMATE");
+    check(
+      `${label} collects the hand-computed amount`,
+      result.collectionTaxDue,
+      expectedTax,
+    );
+    check(
+      `${label} produces exactly one collection line`,
+      result.collectionBreakdown.length,
+      1,
+    );
+    check(`${label} cites a rate-card rule`, result.appliedRuleIds.length, 1);
+    check(`${label} carries no surcharge`, result.surcharge, 0);
+    check(`${label} leaves income-tax totals at zero`, result.taxDue, 0);
+    check(
+      `${label} leaves the income breakdown empty`,
+      result.breakdown.length,
+      0,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 2 — refundability
 //
-// Only Section 151 profit on debt is treated as final. Everything added in
-// this phase stays assessable, which keeps the amount inside the refundable
-// pool instead of writing off a client's refund claim.
+// Section 151 profit on debt and the Section 149(IA) pension limbs are final;
+// an over-deduction there is not converted into an automatic refund claim.
+// Everything else added in this phase stays assessable, which keeps the
+// amount inside the refundable pool instead of writing off a client's refund
+// claim.
 // ---------------------------------------------------------------------------
 
 for (const [route, subcategory] of [
@@ -422,8 +485,7 @@ check(
 // 3 — flat routes combine with anything
 //
 // A flat rate does not depend on the income beneath it, so these combinations
-// must price without raising the aggregation question that blocks two
-// progressive routes.
+// must price beside anything, including a combined slab pair.
 // ---------------------------------------------------------------------------
 
 // salary 8,000,000 -> 1,981,000 (established by the tax-calculation suite)
@@ -480,17 +542,28 @@ check("Three flat routes price", threeFlat.status, "ESTIMATE");
 check("Three flat routes total", threeFlat.taxDue, 596_000);
 check("Three flat routes produce three lines", threeFlat.breakdown.length, 3);
 
-// Two progressive routes must still be refused, and adding a flat route must
-// not accidentally unblock them.
-const twoProgressive = estimate([
+// A final-tax pension stands apart from the slab, so a flat route prices
+// beside a progressive pair as usual: salary 8m -> 1,981,000, pension 4m
+// final at 0, services 1m @ 4% -> 40,000.
+const progressivePairPlusFlat = estimate([
   { route: "salary", income: 8_000_000 },
   { route: "pension", income: 4_000_000 },
   { route: "services", income: 1_000_000, subcategory: "1b-service-it-ites" },
 ]);
 check(
-  "Two progressive routes are still blocked",
-  twoProgressive.status,
-  "NEEDS_RULES",
+  "Progressive pair plus flat prices",
+  progressivePairPlusFlat.status,
+  "ESTIMATE",
+);
+check(
+  "Progressive pair plus flat total",
+  progressivePairPlusFlat.taxDue,
+  2_021_000,
+);
+check(
+  "Progressive pair plus flat lines",
+  progressivePairPlusFlat.breakdown.length,
+  3,
 );
 
 // ---------------------------------------------------------------------------
@@ -653,6 +726,8 @@ for (const route of [
   "capital_gains",
   "business",
   "bank_profit",
+  "imports",
+  "advance_tax",
 ]) {
   check(
     `The pricing loop has no hand-written case for ${route}`,
@@ -735,6 +810,8 @@ const FULLY_COVERED_SOURCES = [
   "business",
   "bank_profit",
   "foreign_income_assets",
+  "dividend",
+  "imports",
 ];
 
 for (const source of FULLY_COVERED_SOURCES) {
@@ -752,31 +829,31 @@ for (const source of FULLY_COVERED_SOURCES) {
   );
 }
 
-// Dividend is deliberately partial: the mutual-fund proportional row is a
-// COMPOSITE charge and the ledger has no debt/equity split to apply it to.
-// Pinned so the gap stays visible and the reason stays recorded.
+// Dividend is fully covered: the mutual-fund proportional row is a COMPOSITE
+// charge priced from the debt/equity split the taxpayer declares on the card.
+// The engine refuses the row when the split is missing or does not add up,
+// and prices it otherwise — pinned both ways below.
 const dividendCatalogRows = TY2026_RATE_CARD_RULES.filter(
   (rule) => rule.source === "dividend",
 );
 check("Section 150 plus 236Z give eight dividend rows", dividendCatalogRows.length, 8);
 check(
-  "Seven dividend rows are implemented",
+  "Eight dividend rows are implemented",
   FLAT_ROUTE_SUBCATEGORIES_FOR_TESTS.dividend.length,
-  7,
+  8,
 );
 check(
-  "The mutual-fund proportional row is excluded",
+  "The mutual-fund proportional row is implemented",
   FLAT_ROUTE_SUBCATEGORIES_FOR_TESTS.dividend.includes(
     "mutual-fund-proportional",
   ),
-  false,
+  true,
 );
 
-// It must be excluded because it cannot be computed, not merely omitted.
 const compositeRow = dividendCatalogRows.find(
   (rule) => rule.subcategory === "mutual-fund-proportional",
 );
-check("The excluded row is a COMPOSITE charge", compositeRow.rates.ATL.kind, "COMPOSITE");
+check("The proportional row is a COMPOSITE charge", compositeRow.rates.ATL.kind, "COMPOSITE");
 
 const proportionalAttempt = estimate([
   { route: "dividend", income: 2_000_000, subcategory: "mutual-fund-proportional" },
@@ -791,6 +868,206 @@ check(
   proportionalAttempt.taxDue,
   null,
 );
+
+// PKR 2m split 1.2m debt / 0.8m equity: 25% + 15% ATL, 50% + 30% Non-ATL.
+const proportionalPriced = estimate([
+  {
+    route: "dividend",
+    income: 2_000_000,
+    subcategory: "mutual-fund-proportional",
+    attributes: { debtPortion: 1_200_000, equityPortion: 800_000 },
+  },
+]);
+check(
+  "The split row prices at 25% debt plus 15% equity",
+  proportionalPriced.taxDue,
+  420_000,
+);
+const proportionalPricedNonAtl = estimate(
+  [
+    {
+      route: "dividend",
+      income: 2_000_000,
+      subcategory: "mutual-fund-proportional",
+      attributes: { debtPortion: 1_200_000, equityPortion: 800_000 },
+    },
+  ],
+  "NON_ATL",
+);
+check(
+  "The split row prices at 50% debt plus 30% equity for Non-ATL",
+  proportionalPricedNonAtl.taxDue,
+  840_000,
+);
+const proportionalMismatch = estimate([
+  {
+    route: "dividend",
+    income: 2_000_000,
+    subcategory: "mutual-fund-proportional",
+    attributes: { debtPortion: 1_000_000, equityPortion: 800_000 },
+  },
+]);
+check(
+  "A split that does not add up is refused",
+  proportionalMismatch.status,
+  "NEEDS_RULES",
+);
+check(
+  "The refusal names the mismatch",
+  proportionalMismatch.note.includes("must equal the dividend income"),
+  true,
+);
+
+// --- imports: the two mobile-phone rows ------------------------------------
+//
+// Mobiles are fixed charges by C&F value band from Part-II of the First
+// Schedule (Ordinance) — the card carries only each column's minimum and
+// maximum. Six bands, hand-copied: 70/100/930/970/5000/11500 on the CBU code
+// and 0/0/0/0/3000/5200 on the CKD code, doubled for Non-ATL.
+const importsCatalogRows = TY2026_RATE_CARD_RULES.filter(
+  (rule) => rule.source === "imports",
+);
+check("Section 148 gives ten import rows", importsCatalogRows.length, 10);
+check(
+  "Ten import rows are implemented",
+  FLAT_ROUTE_SUBCATEGORIES_FOR_TESTS.imports.length,
+  10,
+);
+
+const MOBILE_BAND_CASES = [
+  // [C&F USD, CBU charge, CKD charge]
+  [25, 70, 0],
+  [30, 70, 0],
+  [100, 100, 0],
+  [150, 930, 0],
+  [350, 970, 0],
+  [400, 5000, 3000],
+  [600, 11500, 5200],
+];
+for (const [usd, cbuTax, ckdTax] of MOBILE_BAND_CASES) {
+  for (const [subcategory, expectedTax] of [
+    ["mobile-pct-8517-1219", cbuTax],
+    ["mobile-pct-8517-1211", ckdTax],
+  ]) {
+    for (const [status, multiplier] of [
+      ["ATL", 1],
+      ["NON_ATL", 2],
+    ]) {
+      const result = estimate(
+        [
+          {
+            route: "imports",
+            income: 0,
+            subcategory,
+            attributes: { cfValueUsd: usd, isSmartphone: false },
+          },
+        ],
+        status,
+      );
+      const label = `${subcategory} at $${usd} ${status}`;
+      check(`${label} produces an estimate`, result.status, "ESTIMATE");
+      check(
+        `${label} charges the hand-copied band`,
+        result.collectionTaxDue,
+        expectedTax * multiplier,
+      );
+    }
+  }
+}
+// A $25 smartphone rides band 2, not band 1.
+const smartphone25 = estimate([
+  {
+    route: "imports",
+    income: 0,
+    subcategory: "mobile-pct-8517-1219",
+    attributes: { cfValueUsd: 25, isSmartphone: true },
+  },
+]);
+check("Smartphone at $25 pays band 2", smartphone25.collectionTaxDue, 100);
+// An unconfirmed type at $30 or less refuses on the CBU code...
+const unknownType = estimate([
+  {
+    route: "imports",
+    income: 0,
+    subcategory: "mobile-pct-8517-1219",
+    attributes: { cfValueUsd: 25 },
+  },
+]);
+check(
+  "Unconfirmed handset type at $25 is refused",
+  unknownType.status,
+  "NEEDS_RULES",
+);
+check(
+  "The refusal asks the smartphone question",
+  unknownType.note.includes("smartphone"),
+  true,
+);
+// ...but not above $30, and never on the CKD code, where both low bands pay
+// nothing either way.
+const expensiveNoFlag = estimate([
+  {
+    route: "imports",
+    income: 0,
+    subcategory: "mobile-pct-8517-1219",
+    attributes: { cfValueUsd: 600 },
+  },
+]);
+check(
+  "No handset question above $30",
+  expensiveNoFlag.collectionTaxDue,
+  11500,
+);
+const cheapCkdNoFlag = estimate([
+  {
+    route: "imports",
+    income: 0,
+    subcategory: "mobile-pct-8517-1211",
+    attributes: { cfValueUsd: 25 },
+  },
+]);
+check("CKD at $25 pays nothing", cheapCkdNoFlag.collectionTaxDue, 0);
+// A missing C&F value refuses; there is no band without it.
+const noUsd = estimate([
+  { route: "imports", income: 0, subcategory: "mobile-pct-8517-1219" },
+]);
+check("Mobile without a C&F value is refused", noUsd.status, "NEEDS_RULES");
+check(
+  "The refusal names the missing value",
+  noUsd.note.includes("C&F value in USD"),
+  true,
+);
+// A late filer is still a filer: the filer charge, not double.
+const lateMobile = estimate(
+  [
+    {
+      route: "imports",
+      income: 0,
+      subcategory: "mobile-pct-8517-1219",
+      attributes: { cfValueUsd: 600 },
+    },
+  ],
+  "LATE_FILER",
+);
+check("Late-filer mobile pays the filer charge", lateMobile.collectionTaxDue, 11500);
+// Every priced import row must cite its own catalog rule. Mobiles need their
+// banding inputs to price at all.
+for (const subcategory of FLAT_ROUTE_SUBCATEGORIES_FOR_TESTS.imports) {
+  const rule = importsCatalogRows.find(
+    (candidate) => candidate.subcategory === subcategory,
+  );
+  const attributes = subcategory.startsWith("mobile-")
+    ? { cfValueUsd: 600 }
+    : undefined;
+  const result = estimate([
+    { route: "imports", income: 1_000_000, subcategory, attributes },
+  ]);
+  check(
+    `imports/${subcategory} cites its own rule`,
+    result.collectionBreakdown[0].appliedRuleIds[0],
+    rule.id,
+  );
+}
 
 // --- amount-banded rows -----------------------------------------------------
 //
@@ -934,6 +1211,33 @@ check(
   false,
 );
 
+// The former-employer pension row references Section 149, so the action flags
+// the whole pension onto the salary slabs. Anchored to the salary 12m figure
+// pinned above (3,685,290).
+const pensionAsSalary = estimate(
+  [{ route: "pension", income: 12_000_000 }],
+  "ATL",
+  { pensionTaxAsSalary: true },
+);
+check(
+  "Former-employer pension uses the salary slabs",
+  pensionAsSalary.taxDue,
+  3_685_290,
+);
+
+// Section 12(2A)(i): at 70 the pension is exempt however large.
+const pension70Plus = estimate(
+  [{ route: "pension", income: 15_000_000 }],
+  "ATL",
+  { pensionerAgeBelow70: false, pensionerAge70OrAbove: true },
+);
+check(
+  "Pension at 70-plus is estimated",
+  pension70Plus.status,
+  "ESTIMATE",
+);
+check("Pension at 70-plus pays nothing", pension70Plus.taxDue, 0);
+
 // The two surcharge percentages are different and must not be conflated.
 check(
   "Salary and pension use different surcharge percentages",
@@ -1051,6 +1355,22 @@ check(
   true,
 );
 check(
+  "Activity routes are appended to the priced source list",
+  /routedIncomeSources\.push\(\.\.\.activitySources\)/.test(actionSource),
+  true,
+);
+check(
+  "The missing-figures blocker takes priority over the split message",
+  actionSource.indexOf("activityDetailProblems.length > 0") <
+    actionSource.indexOf("flatRoutesNeedingSplit.length > 0"),
+  true,
+);
+check(
+  "The action flags former-employer pensions onto the salary slabs",
+  actionSource.includes("pensionTaxAsSalary"),
+  true,
+);
+check(
   "Newly routed sources are marked as routed, so they are not reported unrouted",
   /for \(const source of routedFlatSourceNames\) routedSourceNames\.add\(source\)/.test(
     actionSource,
@@ -1159,6 +1479,7 @@ console.log(
         "business",
         "dividend",
         "foreign_income_assets",
+        "imports",
       ],
       catalogRowsNowPriceable: RATE_CASES.length,
       implementedRoutes: [
@@ -1171,6 +1492,7 @@ console.log(
         "capital_gains",
         "business",
         "dividend",
+        "imports",
       ],
       finalTaxRoutes: ["bank_profit"],
       note: "Flat routes are catalog entries, not branches; a multi-rate route without a selected category is refused rather than guessed.",

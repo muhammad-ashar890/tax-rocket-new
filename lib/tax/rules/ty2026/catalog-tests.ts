@@ -293,7 +293,7 @@ export function runTy2026RateCardCatalogTests() {
   const externalDetailRules = TY2026_RATE_CARD_RULES.filter(
     (item) => item.implementationStatus === "NEEDS_EXTERNAL_DETAIL",
   );
-  equal(externalDetailRules.length, 6, "External-detail rule count");
+  equal(externalDetailRules.length, 2, "External-detail rule count");
   for (const item of externalDetailRules) {
     assertionCount += 1;
     if (!item.notes?.length) fail(`${item.id}: external-detail row needs an explanatory note`);

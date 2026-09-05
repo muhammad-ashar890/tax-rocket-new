@@ -134,9 +134,8 @@ rules.push(
     label: "Mobile phones under PCT 8517.1219",
     atl: range(70, 11_500, "REFERENCE_BANDS"),
     nonAtl: range(140, 23_000, "REFERENCE_BANDS"),
-    implementationStatus: "NEEDS_EXTERNAL_DETAIL",
     notes: [
-      "The rate card provides only a minimum-to-maximum range; the underlying mobile-phone band table is required before calculation.",
+      "Priced from the C&F value band table in Part-II of the First Schedule (Ordinance); the card range is that table's minimum and maximum.",
     ],
   }),
   atlNonAtlRule({
@@ -149,9 +148,8 @@ rules.push(
     label: "Mobile phones under PCT 8517.1211",
     atl: range(0, 5_200, "REFERENCE_BANDS"),
     nonAtl: range(0, 10_400, "REFERENCE_BANDS"),
-    implementationStatus: "NEEDS_EXTERNAL_DETAIL",
     notes: [
-      "The rate card provides only a minimum-to-maximum range; the underlying mobile-phone band table is required before calculation.",
+      "Priced from the C&F value band table in Part-II of the First Schedule (Ordinance); the card range is that table's minimum and maximum.",
     ],
   }),
 );
@@ -772,8 +770,7 @@ rules.push(
       attributes: { engineCapacityApplicable: false },
     },
     rates: { DEFAULT: percent(3, "VEHICLE_VALUE") },
-    implementationStatus: "NEEDS_EXTERNAL_DETAIL",
-    notes: ["PDF endnote 1 does not separately state ATL/Non-ATL treatment for this special rate."],
+    notes: ["Non-ATL pays 9%: the Tenth Schedule proviso raises all Section 231B collection by 200% (Moore Shekha Mufti charts the same 3%/9% split)."],
   }),
   rule({
     id: "TY2026-231B-ENDNOTE-2-NON-CC-VEHICLE-FIXED",
@@ -782,16 +779,15 @@ rules.push(
     family: "ADVANCE_TAX",
     source: "advance_tax",
     subcategory: "motor-vehicle-non-cc-fixed",
-    label: "Section 231B(2) vehicle without applicable engine capacity and value of PKR 5 million or more",
+    label: "Vehicle without applicable engine capacity and value of PKR 5 million or more",
     condition: {
       amount: { field: "vehicleValue", minInclusive: 5_000_000 },
       attributes: { engineCapacityApplicable: false },
     },
     rates: { DEFAULT: fixed(20_000) },
-    implementationStatus: "NEEDS_EXTERNAL_DETAIL",
     notes: [
-      "The fixed amount is reduced by 10% for each year from first registration in Pakistan.",
-      "PDF endnote 2 does not separately state ATL/Non-ATL treatment for this special rate.",
+      "The fixed amount is reduced by 10% for each completed year from first registration in Pakistan (compounded).",
+      "Non-ATL pays Rs 60,000: the Tenth Schedule proviso raises all Section 231B collection by 200%.",
     ],
   }),
 );
@@ -1022,7 +1018,9 @@ rules.push(
       amount: { field: "monthlyBill", minInclusive: 0, maxExclusive: 25_000 },
       attributes: { taxpayerStatus: "NON_ATL", consumerType: "DOMESTIC" },
     },
-    rates: { NON_ATL: zero() },
+    // The card row covers non-ATL domestic consumers only; an ATL consumer
+    // is outside the row, so the status is explicit rather than absent.
+    rates: { ATL: notApplicable(), NON_ATL: zero() },
   }),
   rule({
     id: "TY2026-235-DOMESTIC-NON-ATL-25K-OR-MORE",
@@ -1036,7 +1034,10 @@ rules.push(
       amount: { field: "monthlyBill", minInclusive: 25_000 },
       attributes: { taxpayerStatus: "NON_ATL", consumerType: "DOMESTIC" },
     },
-    rates: { NON_ATL: percent(7.5, "MONTHLY_BILL") },
+    rates: {
+      ATL: notApplicable(),
+      NON_ATL: percent(7.5, "MONTHLY_BILL"),
+    },
   }),
 );
 

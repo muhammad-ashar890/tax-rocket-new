@@ -106,22 +106,22 @@ try {
     TY2026_RATE_CARD_RULES.length,
     "Catalog and subcategory coverage agree",
   );
-  equal(deferredOptionCount, 6, "Deferred client-confirmation card count");
+  equal(deferredOptionCount, 2, "Deferred client-confirmation card count");
   equal(
     subcategories.TY2026_SUBCATEGORY_STEPS.length,
     10,
     "Catalog-supported step-definition count",
   );
-  const wizardStepDefinitions = subcategories.TY2026_SUBCATEGORY_STEPS.filter(
-    (step) => !["imports", "advance_tax"].includes(step.source),
-  );
+  // All ten category steps are visible in the wizard, including the two
+  // activity sources (imports, advance tax) whose cards carry declared figures.
+  const wizardStepDefinitions = subcategories.TY2026_SUBCATEGORY_STEPS;
   const wizardSelectableCardCount = wizardStepDefinitions.reduce(
     (total, step) =>
       total + subcategories.getTy2026SubcategoryOptions(step.source).length,
     0,
   );
-  equal(wizardStepDefinitions.length, 8, "Visible wizard category-step count");
-  equal(wizardSelectableCardCount, 66, "Visible wizard subcategory-card count");
+  equal(wizardStepDefinitions.length, 10, "Visible wizard category-step count");
+  equal(wizardSelectableCardCount, 103, "Visible wizard subcategory-card count");
 
   const dynamicSteps = subcategories.getTy2026SubcategoryStepKeys(
     ["salary", "bank_profit", "services"],
@@ -241,6 +241,122 @@ try {
   });
   equal(wrongSource.success, false, "Unselected source subcategory rejected");
 
+  // Declared figures: the detail-field contract the wizard renders and the
+  // calculator enforces must agree, or a card could ask for a figure the
+  // engine never reads (or require one the card never collects).
+  const motorFields = subcategories.getTy2026SubcategoryDetailFields(
+    "advance_tax",
+    "motor-vehicle-value",
+  );
+  ok(
+    motorFields.some((field) => field.key === "amount" && field.required),
+    "Motor-vehicle card requires a declared value",
+  );
+  ok(
+    motorFields.some(
+      (field) => field.key === "engineCapacityCc" && field.required,
+    ),
+    "Motor-vehicle card requires engine capacity",
+  );
+  equal(
+    subcategories.getTy2026SubcategoryDetailFields(
+      "services",
+      "1b-service-it-ites",
+    ).length,
+    0,
+    "Plain income cards expose no declared-figure fields",
+  );
+  const mobileFields = subcategories.getTy2026SubcategoryDetailFields(
+    "imports",
+    "mobile-pct-8517-1219",
+  );
+  ok(
+    mobileFields.some(
+      (field) => field.key === "cfValueUsd" && field.required,
+    ),
+    "Mobile card requires the C&F value",
+  );
+  ok(
+    mobileFields.some(
+      (field) =>
+        field.key === "isSmartphone" &&
+        field.checkbox === true &&
+        !field.required,
+    ),
+    "Mobile card asks the smartphone question optionally",
+  );
+
+  const withDetails = subcategories.resolveTy2026IncomeSelections({
+    incomeSources: ["advance_tax"],
+    selections: [
+      {
+        source: "advance_tax",
+        subcategory: "cash-withdrawal",
+        details: { amount: 100_000 },
+      },
+    ],
+  });
+  ok(withDetails.success, "Declared figures are accepted with the selection");
+  equal(
+    withDetails.selections[0].details.amount,
+    100_000,
+    "Declared figures survive resolve",
+  );
+  const badDetails = subcategories.resolveTy2026IncomeSelections({
+    incomeSources: ["advance_tax"],
+    selections: [
+      {
+        source: "advance_tax",
+        subcategory: "cash-withdrawal",
+        details: { amount: -5 },
+      },
+    ],
+  });
+  equal(badDetails.success, false, "Negative declared figures are rejected");
+  const unknownDetails = subcategories.resolveTy2026IncomeSelections({
+    incomeSources: ["advance_tax"],
+    selections: [
+      {
+        source: "advance_tax",
+        subcategory: "cash-withdrawal",
+        details: { amount: 100_000, whatever: 1 },
+      },
+    ],
+  });
+  ok(unknownDetails.success, "Unknown detail keys do not fail the save");
+  equal(
+    "whatever" in (unknownDetails.selections[0].details ?? {}),
+    false,
+    "Unknown detail keys are dropped",
+  );
+  const withFlag = subcategories.resolveTy2026IncomeSelections({
+    incomeSources: ["imports"],
+    selections: [
+      {
+        source: "imports",
+        subcategory: "mobile-pct-8517-1219",
+        details: { cfValueUsd: 600, isSmartphone: true },
+      },
+    ],
+  });
+  ok(withFlag.success, "Yes/no answers are accepted with the selection");
+  equal(
+    withFlag.selections[0].details.isSmartphone,
+    true,
+    "Yes/no answers survive resolve",
+  );
+  const badFlag = subcategories.resolveTy2026IncomeSelections({
+    incomeSources: ["imports"],
+    selections: [
+      {
+        source: "imports",
+        subcategory: "mobile-pct-8517-1219",
+        details: { cfValueUsd: 600, isSmartphone: "yes" },
+      },
+    ],
+  });
+  equal(badFlag.success, false, "Non-yes/no answers are rejected");
+
   equal(
     getPipelineStartIndex({
       taxYear: 2026,
@@ -283,6 +399,21 @@ try {
   includes(ui, "Select all that apply", "Multi-select UI instruction");
   includes(ui, "needs client", "Deferred-rule UI warning");
   includes(ui, "aria-pressed", "Accessible selectable cards");
+  includes(
+    ui,
+    "onDetailsChange",
+    "Declared-figure edits flow back to the wizard",
+  );
+  includes(
+    ui,
+    'inputMode="decimal"',
+    "Figure inputs request a numeric keyboard",
+  );
+  includes(
+    ui,
+    'type="checkbox"',
+    "Yes/no figures render as checkboxes",
+  );
 
   const setupUi = fs.readFileSync(
     path.join(root, "components", "tax", "filing", "wizard-setup-step.tsx"),
@@ -293,11 +424,11 @@ try {
     'currentStepKey === "tax_activities"',
     "Import/advance-tax wizard step removed",
   );
-  excludes(setupUi, 'value: "imports"', "Imports card removed from wizard");
-  excludes(
+  includes(setupUi, 'value: "imports"', "Imports card visible in wizard");
+  includes(
     setupUi,
     'value: "advance_tax"',
-    "Advance-tax card removed from wizard",
+    "Advance-tax card visible in wizard",
   );
 
   const filingWizard = fs.readFileSync(
@@ -449,7 +580,7 @@ try {
         catalogSubcategoryGroups: optionCount,
         wizardSelectableCards: wizardSelectableCardCount,
         wizardDynamicSteps: wizardStepDefinitions.length,
-        hiddenWizardSources: ["imports", "advance_tax"],
+        activityWizardSources: ["imports", "advance_tax"],
         deferredClientConfirmations: deferredOptionCount,
         assertionCount,
         multipleSelections: true,

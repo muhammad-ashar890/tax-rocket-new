@@ -28,7 +28,7 @@ export function WizardNavigation({
   onCreateFiling,
 }: WizardNavigationProps) {
   return (
-    <div className="mt-8 flex items-center justify-between border-t pt-6">
+    <div className="sticky bottom-0 z-10 mt-8 flex items-center justify-between gap-3 border-t border-border bg-background/95 py-4 backdrop-blur supports-[backdrop-filter]:bg-background/80">
       <Button
         type="button"
         variant="ghost"

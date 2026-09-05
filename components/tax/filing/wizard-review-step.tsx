@@ -39,6 +39,8 @@ type FilingSummary = {
   taxBreakdown?: TaxBreakdownLine[];
   finalTaxDue?: number;
   assessableTaxDue?: number;
+  collectionBreakdown?: TaxBreakdownLine[];
+  collectionTaxDue?: number;
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -52,6 +54,8 @@ const SOURCE_LABELS: Record<string, string> = {
   business: "Business income",
   dividend: "Dividend",
   foreign_income_assets: "Non-Resident",
+  imports: "Imports",
+  advance_tax: "Advance tax",
 };
 
 function sourceLabel(source: string) {
@@ -63,6 +67,8 @@ type WizardReviewStepProps = Readonly<{
   filingSummaryError: string | null;
   taxCalculationError: string | null;
   withholdingWarning: string | null;
+  withholdingConfirmed: boolean;
+  onWithholdingConfirmChange: (checked: boolean) => void;
   calculatingTaxFor: "ATL" | "NON_ATL" | "LATE_FILER" | null;
   reconciliationResolved: boolean;
   draftId?: string;
@@ -74,6 +80,8 @@ export function WizardReviewStep({
   filingSummaryError,
   taxCalculationError,
   withholdingWarning,
+  withholdingConfirmed,
+  onWithholdingConfirmChange,
   calculatingTaxFor,
   reconciliationResolved,
   draftId,
@@ -91,6 +99,10 @@ export function WizardReviewStep({
   const breakdown =
     filingSummary?.taxCalculationStatus === "ESTIMATE"
       ? (filingSummary.taxBreakdown ?? [])
+      : [];
+  const collectionBreakdown =
+    filingSummary?.taxCalculationStatus === "ESTIMATE"
+      ? (filingSummary.collectionBreakdown ?? [])
       : [];
   const needsRules = filingSummary?.taxCalculationStatus === "NEEDS_RULES";
 
@@ -115,6 +127,20 @@ export function WizardReviewStep({
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
           <p className="font-semibold">Check tax deducted at source</p>
           <p className="mt-1">{withholdingWarning}</p>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 border-t border-amber-500/20 pt-3">
+            <input
+              type="checkbox"
+              data-testid="withholding-duplicate-confirm"
+              className="mt-0.5 h-4 w-4 accent-amber-600"
+              checked={withholdingConfirmed}
+              onChange={(e) => onWithholdingConfirmChange(e.target.checked)}
+            />
+            <span>
+              I confirm these ledger rows are separate payments, not the same
+              deduction as the salary certificate. Filing a double-counted
+              figure produces a refund that does not exist.
+            </span>
+          </label>
         </div>
       )}
 
@@ -226,6 +252,52 @@ export function WizardReviewStep({
                 {amount(filingSummary?.assessableTaxDue ?? 0)}.
               </p>
             )}
+          </div>
+        )}
+
+        {collectionBreakdown.length > 0 && (
+          <div className="rounded-lg border border-border/70 bg-muted/20">
+            <div className="border-b border-border/70 px-3 py-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Tax collected at source
+              </p>
+            </div>
+            <ul className="divide-y divide-border/50">
+              {collectionBreakdown.map((line) => (
+                <li
+                  key={`collection-${line.source}-${line.ruleId}`}
+                  className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5"
+                >
+                  <div className="min-w-0">
+                    <span className="text-sm font-medium">
+                      {sourceLabel(line.source)}
+                    </span>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {line.section ? `Section ${line.section} · ` : ""}
+                      {line.income > 0
+                        ? `Base ${amount(line.income)}`
+                        : "Fixed charge"}
+                    </p>
+                  </div>
+                  <span className="text-sm font-semibold tabular-nums">
+                    {amount(line.taxDue)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex items-center justify-between border-t border-border/70 px-3 py-2.5">
+              <span className="text-sm font-semibold">
+                Total collected at source
+              </span>
+              <span className="text-sm font-semibold tabular-nums">
+                {amount(filingSummary?.collectionTaxDue ?? 0)}
+              </span>
+            </div>
+            <p className="border-t border-border/70 px-3 py-2 text-xs text-muted-foreground">
+              Collected when the transaction happened. Not deducted from Tax
+              payable automatically — claim it as credit with CPR,
+              goods-declaration or bill evidence.
+            </p>
           </div>
         )}
 

@@ -1,4 +1,5 @@
 import { toMoneyAmount, type MoneyInput } from "@/lib/money";
+import { prisma } from "@/lib/prisma";
 
 /**
  * Tax already deducted at source reaches a filing from two independent places:
@@ -180,4 +181,116 @@ export function resolveTaxWithheld(input: {
     taxWithheld,
     duplicateWarning,
   };
+}
+
+function parseExtractedNumber(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const parsed = Number(text.replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Section 149 withholding reported on a MAPPED salary certificate. Moved here
+ * from the tax-calculation action so packet approval can re-derive the same
+ * duplicate warning the calculation saw, instead of trusting session state.
+ */
+export function extractMappedSalaryWithholding(extractedData: string | null) {
+  if (!extractedData) return null;
+  try {
+    const payload = JSON.parse(extractedData) as {
+      fields?: Array<{ label?: unknown; value?: unknown }>;
+    };
+    const field = payload.fields?.find((item) => {
+      const label = String(item.label ?? "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_");
+      return (
+        label.includes("tax_deducted") ||
+        label.includes("tax_withheld") ||
+        label.includes("income_tax_deducted")
+      );
+    });
+    return parseExtractedNumber(field?.value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-derives the salary-certificate/ledger duplicate warning for a draft from
+ * current database state. Packet approval and the filing summary both call
+ * this so the confirmation gate follows live data: a warning the user never
+ * saw (page reload, ledger edited after calculation) still blocks approval,
+ * and a warning cleared by removing the duplicate row releases it.
+ *
+ * The salaried-route check mirrors the tax-calculation action exactly: the
+ * certificate is only consulted when salary is selected with the salary
+ * subcategories, so a stale certificate cannot strand a non-salary filing.
+ */
+export async function getWithholdingDuplicateWarning(
+  draftId: string,
+  userId: string,
+): Promise<string | null> {
+  const [draft, selections, salaryCertificate, entries] = await Promise.all([
+    prisma.filingDraft.findUnique({
+      where: { id: draftId },
+      select: { incomeSources: true, taxWithheld: true },
+    }),
+    prisma.filingIncomeSelection.findMany({
+      where: { filingDraftId: draftId, userId },
+      select: { source: true, subcategory: true },
+    }),
+    prisma.document.findFirst({
+      where: {
+        filingDraftId: draftId,
+        userId,
+        documentType: "salary_certificate",
+        extractionStatus: "MAPPED",
+      },
+      select: { extractedData: true },
+    }),
+    prisma.ledgerEntry.findMany({
+      where: { filingDraftId: draftId, userId },
+      select: {
+        entryType: true,
+        category: true,
+        amount: true,
+        description: true,
+      },
+    }),
+  ]);
+
+  if (!draft) return null;
+
+  let incomeSources: string[] = [];
+  try {
+    const parsed = JSON.parse(draft.incomeSources);
+    incomeSources = Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    incomeSources = [];
+  }
+  const salarySelected = selections
+    .filter((selection) => selection.source === "salary")
+    .map((selection) => selection.subcategory);
+  const isSalariedRoute =
+    incomeSources.includes("salary") &&
+    salarySelected.length > 0 &&
+    salarySelected.every(
+      (subcategory) =>
+        subcategory === "salary" || subcategory === "salary-surcharge",
+    );
+
+  const certificateTaxWithheld = isSalariedRoute
+    ? (extractMappedSalaryWithholding(
+        salaryCertificate?.extractedData ?? null,
+      ) ?? 0)
+    : 0;
+
+  return resolveTaxWithheld({
+    certificateTaxWithheld,
+    entries,
+    storedTaxWithheld: toMoneyAmount(draft.taxWithheld),
+  }).duplicateWarning;
 }

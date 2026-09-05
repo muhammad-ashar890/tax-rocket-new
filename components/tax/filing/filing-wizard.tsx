@@ -27,6 +27,7 @@ import {
 import { getUserProfile } from "@/app/actions/user";
 
 import { getRequiredTaxDocumentTypesForCurrentFlow } from "@/lib/tax/document-requirements";
+import { SUPPORTED_TAX_YEARS } from "@/lib/tax/tax-year-period";
 import {
   advanceWizardCompletion,
   clampWizardLocation,
@@ -102,7 +103,14 @@ import { useFilingFinalization } from "@/components/tax/filing/hooks/use-filing-
 // and step metadata live in filing-wizard-config.ts so they can be reused
 // without moving any server actions or changing the filing behavior.
 
-const currentTaxYear = new Date().getFullYear();
+// Pilot goes live on TY2026 only; if the calendar has moved past the last
+// supported year, fall back to it so the selector never opens on a year the
+// server will reject.
+const currentTaxYear = (
+  SUPPORTED_TAX_YEARS as readonly number[]
+).includes(new Date().getFullYear())
+  ? new Date().getFullYear()
+  : SUPPORTED_TAX_YEARS[0];
 
 export function FilingWizard({
   createAction,
@@ -156,11 +164,11 @@ export function FilingWizard({
     return () => clearTimeout(handle);
   }, [step]);
 
-  // ── Demo-only: once "Create Filing" is pressed, a lightweight local
-  // draft record is created purely so this single component can track
-  // progress through the pipeline phase and be resumed later. This has
-  // no bearing on the `createAction` backend contract below — that is
-  // still called with the real FormData at the same point as before. ──
+  // ── Local draft handle: once "Create Filing" is pressed (or an existing
+  // draft is resumed), its id is kept here so this component can track
+  // progress through the pipeline phase. This has no bearing on the
+  // `createAction` backend contract below — that is still called with the
+  // real FormData at the same point as before. ──
   const [draftId, setDraftId] = useState<string | null>(null);
 
   // ── Step: Who is filing? (unchanged) ──
@@ -229,12 +237,7 @@ export function FilingWizard({
 
   const [readinessCompleted, setReadinessCompleted] = useState<
     TaxReadinessItem[]
-  >([
-    "cnic_ntn_ready",
-    "iris_credentials_ready",
-    "mobile_email_ready",
-    "core_documents_ready",
-  ]);
+  >(["core_documents_ready"]);
 
   // ── Pipeline-phase state (Ledgers → Reconciliation → Review → Filing Packet → Approval → FBR Connect) ──
   const [bankIntelligenceClassified, setBankIntelligenceClassified] =
@@ -243,6 +246,9 @@ export function FilingWizard({
     useState(false);
   const [bankStatementSaved, setBankStatementSaved] = useState(false);
   const [fbrConnectionStatus, setFbrConnectionStatus] = useState("NOT_STARTED");
+  // Self-attested FBR Iris login - required on the packet step before the
+  // wizard opens FBR Connect (replaces the retired readiness tap).
+  const [irisLoginConfirmed, setIrisLoginConfirmed] = useState(false);
 
   const [filingSummary, setFilingSummary] = useState<FilingSummary | null>(
     null,
@@ -323,8 +329,14 @@ export function FilingWizard({
         ),
       ]);
       setTaxYear(existing.taxYear);
+      // Drop retired readiness values (CNIC/Iris/Mobile left the
+      // checklist - they are hard requirements now, not taps).
       setReadinessCompleted(
-        (existing.readinessCompleted as TaxReadinessItem[]) ?? [],
+        (
+          (existing.readinessCompleted as TaxReadinessItem[] | null) ?? []
+        ).filter((value) =>
+          readinessOptions.some((option) => option.value === value),
+        ),
       );
       getBankAccountsAction(existing.id).then((accountsResult) => {
         if (!isMounted || !accountsResult.success) return;
@@ -643,6 +655,24 @@ export function FilingWizard({
     [resetForSetupChange],
   );
 
+  // Declared figures ride on the selected card. Editing a figure resets
+  // downstream state exactly like swapping the category itself.
+  const updateIncomeSubcategoryDetails = useCallback(
+    (selection: Ty2026IncomeSelectionInput) => {
+      setFilingActionError(null);
+      resetForSetupChange();
+      setIncomeSubcategorySelections((previous) =>
+        previous.map((item) =>
+          item.source === selection.source &&
+          item.subcategory === selection.subcategory
+            ? { ...item, details: selection.details }
+            : item,
+        ),
+      );
+    },
+    [resetForSetupChange],
+  );
+
   const toggleReadiness = useCallback(
     (value: TaxReadinessItem) => {
       resetForSetupChange();
@@ -831,6 +861,7 @@ export function FilingWizard({
         ? "income"
         : subcategorySteps.find((subcategoryStep) => {
             const source = getTy2026SourceForStep(subcategoryStep);
+            if (source === "pension") return false;
             return !incomeSubcategorySelections.some(
               (selection) => selection.source === source,
             );
@@ -913,12 +944,15 @@ export function FilingWizard({
     calculatingTaxFor,
     taxCalculationError,
     withholdingWarning,
+    withholdingConfirmed,
     filingPacket,
     generatingPacket,
     generatingPdf,
     packetError,
     setApprovalConfirmed,
     setFilingPacket,
+    setWithholdingWarning,
+    setWithholdingConfirmed,
     handleApprovalChange,
     handleGeneratePacket,
     handleGeneratePacketPdf,
@@ -943,6 +977,9 @@ export function FilingWizard({
       if (!isMounted) return;
       if (result.success) {
         setFilingSummary(result.summary as FilingSummary);
+        setWithholdingWarning(
+          (result.summary as FilingSummary).withholdingWarning ?? null,
+        );
       } else {
         setFilingSummaryError(result.error ?? "Failed to load filing summary");
       }
@@ -976,6 +1013,8 @@ export function FilingWizard({
     if (currentStepKey === "income") return selectedIncomeSources.length > 0;
     if (isTy2026SubcategoryStepKey(currentStepKey)) {
       const source = getTy2026SourceForStep(currentStepKey);
+      // Pension bands are auto-derived; the working question is optional.
+      if (source === "pension") return true;
       return incomeSubcategorySelections.some(
         (selection) => selection.source === source,
       );
@@ -993,6 +1032,15 @@ export function FilingWizard({
         )
       );
     }
+    // Readiness: every shown card must be tapped before leaving the step.
+    if (currentStepKey === "readiness") {
+      return (
+        readinessOptions.length > 0 &&
+        readinessOptions.every((option) =>
+          readinessCompleted.includes(option.value),
+        )
+      );
+    }
     // Keep Continue clickable on review-gated pipeline steps so the user
     // receives a clear error explaining what remains instead of a disabled
     // button with no feedback.
@@ -1002,7 +1050,8 @@ export function FilingWizard({
     ) {
       return true;
     }
-    if (currentStepKey === "filing_packet") return Boolean(filingPacket);
+    if (currentStepKey === "filing_packet")
+      return Boolean(filingPacket) && irisLoginConfirmed;
     if (currentStepKey === "reconciliation")
       return Boolean(reconciliationResolved);
     if (currentStepKey === "approval") return approvalConfirmed;
@@ -1017,11 +1066,13 @@ export function FilingWizard({
     salaryPercentage,
     taxYear,
     bankAccounts,
+    readinessCompleted,
     bankIntelligenceClassified,
     reconciliationResolved,
     reconciliationPreview,
     filingPacket,
     approvalConfirmed,
+    irisLoginConfirmed,
   ]);
 
   const approvalBlockers = useMemo(() => {
@@ -1064,6 +1115,14 @@ export function FilingWizard({
       blockers.push("Resolve the remaining Mizan gap before approval");
     }
 
+    // Client-side mirror of the server approval gate: the approval checkbox
+    // stays disabled until the duplicate check is confirmed on Review.
+    if (withholdingWarning && !withholdingConfirmed) {
+      blockers.push(
+        "Confirm on the Review step that the salary-tax rows are separate payments",
+      );
+    }
+
     return blockers;
   }, [
     documentRecords,
@@ -1071,6 +1130,8 @@ export function FilingWizard({
     filingSummary,
     bankTransactionsReviewed,
     reconciliationResolved,
+    withholdingWarning,
+    withholdingConfirmed,
   ]);
 
   const approvalReady = approvalBlockers.length === 0;
@@ -1086,6 +1147,7 @@ export function FilingWizard({
     if (
       subcategorySteps.some((subcategoryStep) => {
         const source = getTy2026SourceForStep(subcategoryStep);
+        if (source === "pension") return false;
         return !incomeSubcategorySelections.some(
           (selection) => selection.source === source,
         );
@@ -1368,6 +1430,7 @@ export function FilingWizard({
         b.push("Select at least one income source");
       for (const subcategoryStep of subcategorySteps) {
         const source = getTy2026SourceForStep(subcategoryStep);
+        if (source === "pension") continue;
         if (
           !incomeSubcategorySelections.some(
             (selection) => selection.source === source,
@@ -1799,6 +1862,7 @@ export function FilingWizard({
           currentStepKey={currentStepKey}
           selections={incomeSubcategorySelections}
           onToggle={toggleIncomeSubcategory}
+          onDetailsChange={updateIncomeSubcategoryDetails}
         />
       );
     }
@@ -1938,6 +2002,8 @@ export function FilingWizard({
         filingSummaryError={filingSummaryError}
         taxCalculationError={taxCalculationError}
         withholdingWarning={withholdingWarning}
+        withholdingConfirmed={withholdingConfirmed}
+        onWithholdingConfirmChange={setWithholdingConfirmed}
         calculatingTaxFor={calculatingTaxFor}
         reconciliationResolved={Boolean(reconciliationResolved)}
         draftId={draftId ?? undefined}
@@ -1971,6 +2037,8 @@ export function FilingWizard({
         packetError={packetError}
         onGeneratePacket={handleGeneratePacket}
         onGeneratePdf={handleGeneratePacketPdf}
+        irisLoginConfirmed={irisLoginConfirmed}
+        onIrisLoginChange={setIrisLoginConfirmed}
       />
     );
   }
@@ -1980,6 +2048,9 @@ export function FilingWizard({
       <WizardFbrStep
         draftId={draftId ?? undefined}
         onConnectionStatusChange={setFbrConnectionStatus}
+        taxPayable={filingSummary?.taxPayable ?? null}
+        refundDue={filingSummary?.refundDue ?? null}
+        packetVersion={filingPacket?.version}
       />
     );
   }

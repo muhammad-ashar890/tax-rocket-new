@@ -19,13 +19,11 @@ export type PracticePreferences = {
   taxYear: string;
   currency: string;
   autoGeneratePackets: boolean;
-  autoAdvanceStatus: boolean;
 };
 
 export type SettingsInput = {
   notifications: NotificationPreferences;
   practice: PracticePreferences;
-  twoFactorEnabled: boolean;
 };
 
 const DEFAULT_NOTIFICATIONS: NotificationPreferences = {
@@ -40,7 +38,6 @@ const DEFAULT_PRACTICE: PracticePreferences = {
   taxYear: String(new Date().getFullYear()),
   currency: "PKR",
   autoGeneratePackets: false,
-  autoAdvanceStatus: false,
 };
 
 function parseJsonObject(value: string, fallback: Record<string, unknown>) {
@@ -56,7 +53,6 @@ function normalizeSettings(user: {
   notificationPreferences: string;
   practicePreferences: string;
   defaultTaxYear: number | null;
-  twoFactorEnabled: boolean;
 }) {
   const storedNotifications = parseJsonObject(user.notificationPreferences, {});
   const storedPractice = parseJsonObject(user.practicePreferences, {});
@@ -77,10 +73,7 @@ function normalizeSettings(user: {
           DEFAULT_PRACTICE.taxYear,
       ),
       currency: "PKR",
-      // Product rule: the wizard always requires an explicit Continue click.
-      autoAdvanceStatus: false,
     } as PracticePreferences,
-    twoFactorEnabled: user.twoFactorEnabled,
   };
 }
 
@@ -96,7 +89,6 @@ export async function getUserSettingsAction() {
         notificationPreferences: true,
         practicePreferences: true,
         defaultTaxYear: true,
-        twoFactorEnabled: true,
       },
     });
 
@@ -148,7 +140,7 @@ export async function updateUserSettingsAction(input: SettingsInput) {
     if (!Number.isInteger(taxYear) || !isSupportedTaxYear(taxYear)) {
       return {
         success: false,
-        error: "Only Tax Years 2026 and 2027 are currently supported",
+        error: "Only Tax Year 2026 is currently supported",
       };
     }
 
@@ -161,8 +153,6 @@ export async function updateUserSettingsAction(input: SettingsInput) {
       ...input.practice,
       taxYear: String(taxYear),
       currency: "PKR",
-      // Never allow this preference to turn wizard auto-advance back on.
-      autoAdvanceStatus: false,
     };
 
     await prisma.user.update({
@@ -171,7 +161,6 @@ export async function updateUserSettingsAction(input: SettingsInput) {
         defaultTaxYear: taxYear,
         notificationPreferences: JSON.stringify(notifications),
         practicePreferences: JSON.stringify(practice),
-        twoFactorEnabled: Boolean(input.twoFactorEnabled),
       },
     });
 

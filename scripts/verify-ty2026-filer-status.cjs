@@ -71,10 +71,20 @@ try {
     ...commonBankInput,
     filerStatus: "NON_ATL",
   });
+  const lateFilerBank = calculateTaxEstimate({
+    ...commonBankInput,
+    filerStatus: "LATE_FILER",
+  });
   equal(atlBank.taxDue, 20_000, "ATL bank-profit estimate");
   equal(nonAtlBank.taxDue, 40_000, "Non-ATL bank-profit estimate");
+  equal(
+    lateFilerBank.taxDue,
+    20_000,
+    "Late-filer bank-profit estimate follows the ATL rate",
+  );
   equal(atlBank.filerStatus, "ATL", "ATL result status");
   equal(nonAtlBank.filerStatus, "NON_ATL", "Non-ATL result status");
+  equal(lateFilerBank.filerStatus, "LATE_FILER", "Late-filer result status");
 
   const commonSalaryInput = {
     taxYear: 2026,
@@ -107,8 +117,8 @@ try {
   );
   equal(
     parseManualTaxpayerListStatus("LATE_FILER"),
-    null,
-    "Manual Late Filer rejection",
+    "LATE_FILER",
+    "Manual Late Filer accepted",
   );
   equal(
     parseManualTaxpayerListStatus("invalid"),
@@ -121,6 +131,7 @@ try {
     "utf8",
   );
   includes(ui, "Calculate for ATL", "ATL button");
+  includes(ui, "Calculate for Late Filer", "Late Filer button");
   includes(ui, "Calculate for Non-ATL", "Non-ATL button");
   includes(ui, "Calculated for", "Selected-status result badge");
 
@@ -177,7 +188,7 @@ try {
   );
   includes(
     packet,
-    "Calculate a current ATL or Non-ATL tax estimate first",
+    "Calculate a current ATL, Late Filer or Non-ATL tax estimate first",
     "Packet gate",
   );
   includes(packet, "Taxpayer-list status:", "Packet PDF status");
@@ -186,9 +197,9 @@ try {
   console.log(
     JSON.stringify(
       {
-        calculationScenarios: 4,
+        calculationScenarios: 5,
         assertionCount,
-        buttons: ["ATL", "NON_ATL"],
+        buttons: ["ATL", "LATE_FILER", "NON_ATL"],
         statusSource: "MANUAL",
         stalePacketInvalidation: true,
         stateAwareRailCompletion: true,

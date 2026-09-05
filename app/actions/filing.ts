@@ -19,6 +19,7 @@ import {
 import { prisma } from "@/lib/prisma";
 import { validateFilingCompleteness } from "@/lib/tax/filing-completeness";
 import { validateAuthoritativeReconciliation } from "@/lib/tax/reconciliation-calculation";
+import { getWithholdingDuplicateWarning } from "@/lib/tax/withholding-sources";
 import { isSupportedTaxYear } from "@/lib/tax/tax-year-period";
 import {
   advanceWizardCompletion,
@@ -29,8 +30,10 @@ import { isTaxActivitySource } from "@/lib/tax/filing-drafts";
 import {
   getTy2026SelectionDetails,
   isTy2026AutomaticIncomeSelection,
+  parsePersistedSelectionUserDetails,
   resolveTy2026IncomeSelections,
   type Ty2026IncomeSelectionInput,
+  type Ty2026SelectionUserDetails,
 } from "@/lib/tax/rules/ty2026/subcategories";
 
 async function getCurrentUserId() {
@@ -89,7 +92,7 @@ function parseFilingDraftInput(
 
   if (!Number.isInteger(taxYear) || !isSupportedTaxYear(taxYear)) {
     return {
-      error: "Only Tax Years 2026 and 2027 are currently supported",
+      error: "Only Tax Year 2026 is currently supported",
     } as const;
   }
 
@@ -112,7 +115,16 @@ function parseFilingDraftInput(
       const source = String(parsedSelection.source ?? "").trim();
       const subcategory = String(parsedSelection.subcategory ?? "").trim();
       if (!source || !subcategory) throw new Error("Missing selection fields");
-      rawSelections.push({ source, subcategory });
+      const details = parsedSelection.details;
+      rawSelections.push({
+        source,
+        subcategory,
+        // Shape-validated by resolveTy2026IncomeSelections below; anything
+        // out of shape fails the save with a specific error.
+        ...(details && typeof details === "object" && !Array.isArray(details)
+          ? { details: details as Ty2026SelectionUserDetails }
+          : {}),
+      });
     }
   } catch {
     return { error: "Income subcategory selections are invalid" } as const;
@@ -196,10 +208,13 @@ async function replaceIncomeSelections(
         ? "DERIVED"
         : "MANUAL",
       status: "SELECTED",
-      detailsJson: JSON.stringify(
-        getTy2026SelectionDetails(selection.source, selection.subcategory) ??
-          {},
-      ),
+      detailsJson: JSON.stringify({
+        ...(getTy2026SelectionDetails(
+          selection.source,
+          selection.subcategory,
+        ) ?? {}),
+        ...(selection.details ? { userDetails: selection.details } : {}),
+      }),
     })),
   });
 }
@@ -421,6 +436,7 @@ export async function saveFilingDraftAction(formData: FormData) {
 export async function confirmFilingForPacketAction(
   draftId: string,
   confirmed: boolean,
+  withholdingDuplicateConfirmed = false,
 ) {
   try {
     if (draftId.startsWith("draft_")) {
@@ -463,17 +479,28 @@ export async function confirmFilingForPacketAction(
     }
 
     if (confirmed) {
-      const [completeness, reconciliation] = await Promise.all([
-        validateFilingCompleteness({ draftId: ownedDraftId, userId }),
-        validateAuthoritativeReconciliation({
-          draftId: ownedDraftId,
-          userId,
-        }),
-      ]);
+      const [completeness, reconciliation, duplicateWarning] =
+        await Promise.all([
+          validateFilingCompleteness({ draftId: ownedDraftId, userId }),
+          validateAuthoritativeReconciliation({
+            draftId: ownedDraftId,
+            userId,
+          }),
+          getWithholdingDuplicateWarning(ownedDraftId, userId),
+        ]);
       const blockers = Array.from(
         new Set([
           ...completeness.blockers,
           ...("blockers" in reconciliation ? reconciliation.blockers : []),
+          // Re-derived here, never trusted from the client: a direct action
+          // call with confirmed=true must face the same question the Review
+          // step asked. The persisted approval is the proof of confirmation,
+          // and recalculation revokes it, so no column is needed.
+          ...(duplicateWarning && !withholdingDuplicateConfirmed
+            ? [
+                "Confirm on the Review step that the salary-tax ledger rows are separate payments, not the same deduction as the salary certificate",
+              ]
+            : []),
           ...(["ATL", "NON_ATL", "LATE_FILER"].includes(
             draft.taxpayerListStatus ?? "",
           ) &&
@@ -915,7 +942,7 @@ export async function getFilingDraftAction(draftId: string) {
         incomeSelections: {
           where: { status: "SELECTED" },
           orderBy: [{ source: "asc" }, { subcategory: "asc" }],
-          select: { source: true, subcategory: true },
+          select: { source: true, subcategory: true, detailsJson: true },
         },
       },
     });
@@ -928,7 +955,18 @@ export async function getFilingDraftAction(draftId: string) {
       draft: {
         ...draftFields,
         incomeSources: JSON.parse(draft.incomeSources),
-        incomeSubcategorySelections: incomeSelections,
+        // Declared figures travel back so resume never wipes them: the
+        // wizard re-saves the hydrated state on the next auto-save.
+        incomeSubcategorySelections: incomeSelections.map((selection) => {
+          const details = parsePersistedSelectionUserDetails(
+            selection.detailsJson,
+          );
+          return {
+            source: selection.source,
+            subcategory: selection.subcategory,
+            ...(details ? { details } : {}),
+          };
+        }),
         readinessCompleted: JSON.parse(draft.readinessChecks),
       },
     };
@@ -977,7 +1015,7 @@ export async function updateFilingDraftAction(
       ) {
         return {
           success: false,
-          error: "Only Tax Years 2026 and 2027 are currently supported",
+          error: "Only Tax Year 2026 is currently supported",
         };
       }
       dataToUpdate.taxYear = formData.taxYear;
@@ -1030,7 +1068,7 @@ export async function updateFilingDraftAction(
         incomeSources: true,
         incomeSelections: {
           where: { status: "SELECTED" },
-          select: { source: true, subcategory: true },
+          select: { source: true, subcategory: true, detailsJson: true },
         },
       },
     });
@@ -1075,11 +1113,38 @@ export async function updateFilingDraftAction(
       }
     }
 
+    // Declared figures are part of the classification: editing a bill, a
+    // vehicle value or a split must invalidate downstream results exactly
+    // like swapping the category itself.
+    const fingerprintDetails = (details?: Ty2026SelectionUserDetails) =>
+      details
+        ? Object.keys(details)
+            .sort()
+            .map(
+              (key) =>
+                `${key}=${details[key as keyof Ty2026SelectionUserDetails]}`,
+            )
+            .join(",")
+        : "";
     const selectionKeys = (selections: readonly Ty2026IncomeSelectionInput[]) =>
       selections
-        .map((selection) => `${selection.source}\u0000${selection.subcategory}`)
+        .map(
+          (selection) =>
+            `${selection.source}\u0000${selection.subcategory}\u0000${fingerprintDetails(selection.details)}`,
+        )
         .sort();
-    const previousSelectionKeys = selectionKeys(currentDraft.incomeSelections);
+    const previousSelections: Ty2026IncomeSelectionInput[] =
+      currentDraft.incomeSelections.map((selection) => {
+        const details = parsePersistedSelectionUserDetails(
+          selection.detailsJson,
+        );
+        return {
+          source: selection.source,
+          subcategory: selection.subcategory,
+          ...(details ? { details } : {}),
+        };
+      });
+    const previousSelectionKeys = selectionKeys(previousSelections);
     const nextSelectionKeys =
       resolvedSelections === undefined
         ? previousSelectionKeys

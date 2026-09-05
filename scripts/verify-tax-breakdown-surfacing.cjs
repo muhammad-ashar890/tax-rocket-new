@@ -115,8 +115,52 @@ check(
   mixed.taxDue,
 );
 
-// A blocked filing must not render a misleading empty table.
-const blocked = calculateTaxEstimate({
+// Collection lines travel beside the income breakdown, never inside it.
+const withCollection = calculateTaxEstimate({
+  taxYear: 2026,
+  filerStatus: "ATL",
+  totalIncome: 8_000_000,
+  totalExpenses: 0,
+  incomeSources: [
+    { route: "salary", income: 8_000_000 },
+    { route: "imports", income: 2_000_000, subcategory: "part-i" },
+  ],
+  isSalariedRoute: true,
+  isBankProfitRoute: false,
+});
+check(
+  "Income and collection price together",
+  withCollection.status,
+  "ESTIMATE",
+);
+check(
+  "The income breakdown holds one line",
+  withCollection.breakdown.length,
+  1,
+);
+check(
+  "The collection section holds one line",
+  withCollection.collectionBreakdown.length,
+  1,
+);
+check(
+  "Collection is not folded into the headline",
+  withCollection.taxDue,
+  withCollection.breakdown[0].taxDue,
+);
+check(
+  "Part-I collection on 2m",
+  withCollection.collectionTaxDue,
+  20_000,
+);
+check(
+  "The note discloses the collection",
+  withCollection.note.includes("collected at source"),
+  true,
+);
+
+// A combined filing renders one joint line whose row agrees with the footer.
+const combined = calculateTaxEstimate({
   taxYear: 2026,
   filerStatus: "ATL",
   totalIncome: 12_000_000,
@@ -129,10 +173,46 @@ const blocked = calculateTaxEstimate({
   isRentalRoute: true,
   isBankProfitRoute: false,
 });
+check("A combined filing is estimated", combined.status, "ESTIMATE");
+check(
+  "A combined filing renders one joint line",
+  combined.breakdown.length,
+  1,
+);
+check(
+  "The joint row equals the headline",
+  combined.breakdown[0].taxDue,
+  combined.taxDue,
+);
+check("The joint total is 4,894,100", combined.taxDue, 4_894_100);
+check(
+  "The joint row names both sources",
+  combined.breakdown[0].note.includes("salary") &&
+    combined.breakdown[0].note.includes("rental income"),
+  true,
+);
+
+// A still-blocked filing must not render a misleading table: an unconfirmed
+// pension age above 10m refuses with no lines at all.
+const blocked = calculateTaxEstimate({
+  taxYear: 2026,
+  filerStatus: "ATL",
+  totalIncome: 15_000_000,
+  totalExpenses: 0,
+  incomeSources: [{ route: "pension", income: 15_000_000 }],
+  isSalariedRoute: false,
+  isPensionRoute: true,
+  isBankProfitRoute: false,
+});
 check("A blocked filing needs rules", blocked.status, "NEEDS_RULES");
 check(
   "A blocked filing has no breakdown to render",
   blocked.breakdown.length,
+  0,
+);
+check(
+  "A blocked filing has no collection lines either",
+  blocked.collectionBreakdown.length,
   0,
 );
 
@@ -143,8 +223,15 @@ check(
 const calculationAction = read("app/actions/tax-calculation.ts");
 
 check(
-  "The breakdown is mapped into calculation lines",
-  calculationAction.includes("result.breakdown.map"),
+  "Income and collection lines are persisted together",
+  calculationAction.includes(
+    "const pricedLines = [...result.breakdown, ...result.collectionBreakdown]",
+  ),
+  true,
+);
+check(
+  "The priced lines are mapped into calculation lines",
+  calculationAction.includes("pricedLines.map"),
   true,
 );
 check(
@@ -251,6 +338,16 @@ check(
   true,
 );
 check(
+  "Collection lines are split out of the income breakdown",
+  summaryAction.includes("collectionBreakdown"),
+  true,
+);
+check(
+  "Collected tax is totalled separately",
+  summaryAction.includes("collectionTaxDue"),
+  true,
+);
+check(
   "Malformed detail JSON cannot crash the summary",
   summaryAction.includes("catch"),
   true,
@@ -304,7 +401,20 @@ for (const [name, source] of [
 }
 
 // Human-readable labels must exist for every route the engine can emit.
-const engineRoutes = ["salary", "pension", "property_rent", "bank_profit"];
+const engineRoutes = [
+  "salary",
+  "pension",
+  "property_rent",
+  "bank_profit",
+  "services",
+  "other_income",
+  "capital_gains",
+  "business",
+  "dividend",
+  "foreign_income_assets",
+  "imports",
+  "advance_tax",
+];
 for (const route of engineRoutes) {
   check(
     `The packet step labels ${route}`,
@@ -332,6 +442,16 @@ check(
 check(
   "The review step surfaces a blocked calculation",
   reviewStep.includes("NEEDS_RULES"),
+  true,
+);
+check(
+  "The review step renders collected tax separately",
+  reviewStep.includes("Total collected at source"),
+  true,
+);
+check(
+  "The shared summary type carries the collection lines",
+  wizardConfig.includes("collectionBreakdown?: TaxBreakdownLine[]"),
   true,
 );
 

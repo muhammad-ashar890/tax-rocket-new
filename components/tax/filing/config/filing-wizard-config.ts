@@ -1,11 +1,10 @@
 import {
   BadgeDollarSign,
+  BadgePercent,
   Banknote,
   BriefcaseBusiness,
   Building2,
-  CircleDot,
   Coins,
-  CreditCard,
   FileCheck2,
   FileText,
   Globe2,
@@ -14,8 +13,8 @@ import {
   LaptopMinimal,
   Leaf,
   Link2,
-  Mail,
   ReceiptText,
+  Ship,
   type LucideIcon,
 } from "lucide-react";
 
@@ -58,6 +57,8 @@ export const incomeSourceOptions = [
     icon: ReceiptText,
   },
   { value: "other_income", label: "Other Income", icon: FileText },
+  { value: "imports", label: "Imports", icon: Ship },
+  { value: "advance_tax", label: "Advance Tax", icon: BadgePercent },
 ] as const satisfies ReadonlyArray<{
   value: string;
   label: string;
@@ -65,9 +66,6 @@ export const incomeSourceOptions = [
 }>;
 
 export const readinessOptions = [
-  { value: "cnic_ntn_ready", label: "CNIC / NTN", icon: CreditCard },
-  { value: "iris_credentials_ready", label: "Iris Login", icon: CircleDot },
-  { value: "mobile_email_ready", label: "Mobile / Email", icon: Mail },
   {
     value: "previous_return_available",
     label: "Previous Return",
@@ -145,10 +143,18 @@ export type FilingSummary = {
   refundDue: number | null;
   taxCalculationStatus: string;
   taxpayerListStatus: "ATL" | "NON_ATL" | "LATE_FILER" | null;
+  /** Salary-certificate/ledger duplicate warning, recomputed on every summary load. */
+  withholdingWarning: string | null;
   /** Per-source detail behind the totals above. */
   taxBreakdown?: TaxBreakdownLine[];
   finalTaxDue?: number;
   assessableTaxDue?: number;
+  /**
+   * Collection-route lines (imports, advance tax): tax already collected at
+   * source, reported separately and never folded into the totals above.
+   */
+  collectionBreakdown?: TaxBreakdownLine[];
+  collectionTaxDue?: number;
 };
 
 export type FilingPacketSummary = {

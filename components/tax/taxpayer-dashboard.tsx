@@ -56,8 +56,6 @@ type TaxpayerDashboardProps = {
   activeFilings?: ActiveFilingSummary[];
   approvedFilings?: ActiveFilingSummary[];
   recentActivity?: RecentActivityItem[];
-  isPractitioner?: boolean;
-  clientCount?: number;
 };
 
 const activityIconMap: Record<
@@ -79,8 +77,6 @@ export function TaxpayerDashboard({
   activeFilings = [],
   approvedFilings = [],
   recentActivity = [],
-  isPractitioner = false,
-  clientCount,
 }: TaxpayerDashboardProps) {
   const hasActiveFiling = activeDraftCount > 0;
   const hasApprovedFiling = approvedDraftCount > 0;
@@ -101,7 +97,7 @@ export function TaxpayerDashboard({
               className="mb-3 border-amanah/25 bg-amanah/10 text-amanah"
             >
               <Sparkles className="mr-1.5 h-3 w-3" />
-              {isPractitioner ? "Practitioner Daftar" : "Your Tax Daftar"}
+              Your Tax Daftar
             </Badge>
             <h1 className="text-2xl font-bold tracking-tight text-foreground md:text-4xl">
               Hello, {firstName}
@@ -136,7 +132,7 @@ export function TaxpayerDashboard({
               </Button>
             )}
             <Button asChild size="lg" variant="outline" className="gap-2">
-              <Link href="/tax/guide">
+              <Link href="/tax/guide#how-it-works">
                 How it works
                 <ArrowRight className="h-4 w-4" />
               </Link>
@@ -203,20 +199,11 @@ export function TaxpayerDashboard({
               : "Nothing yet"
           }
         />
-        {isPractitioner ? (
-          <WorkflowKpiCard
-            label="Clients"
-            value={String(clientCount ?? 0)}
-            sub="Managed under your Daftar"
-            accent="indus"
-          />
-        ) : (
-          <WorkflowKpiCard
-            label="Tax year"
-            value={String(defaultTaxYear ?? new Date().getFullYear())}
-            sub="Default for new filings"
-          />
-        )}
+        <WorkflowKpiCard
+          label="Tax year"
+          value={String(defaultTaxYear ?? new Date().getFullYear())}
+          sub="Default for new filings"
+        />
       </WorkflowKpiStrip>
 
       {/* ── Recent activity ───────────────────────────────────────── */}
@@ -267,32 +254,5 @@ export function TaxpayerDashboard({
         </section>
       )}
     </div>
-  );
-}
-
-function QuickLinkCard({
-  href,
-  icon: Icon,
-  title,
-  desc,
-}: {
-  href: string;
-  icon: React.ElementType;
-  title: string;
-  desc: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className="group flex flex-col gap-2 rounded-xl border bg-card p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:border-amanah/30 hover:shadow-md"
-    >
-      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amanah/10 text-amanah transition-colors group-hover:bg-amanah/15">
-        <Icon className="h-4.5 w-4.5" />
-      </div>
-      <div>
-        <p className="text-sm font-semibold text-foreground">{title}</p>
-        <p className="text-xs text-muted-foreground">{desc}</p>
-      </div>
-    </Link>
   );
 }

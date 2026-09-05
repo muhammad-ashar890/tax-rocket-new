@@ -14,7 +14,6 @@ type WizardApprovalStepProps = Readonly<{
 }>;
 
 export function WizardApprovalStep({
-  draftId,
   approvalConfirmed,
   packetVersion,
   approvalLocked = false,
@@ -30,10 +29,7 @@ export function WizardApprovalStep({
       />
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
         <ApprovalPacket
-          draftId={draftId}
-          onCancel={() => {}}
           onApprovalChange={onApprovalChange}
-          showGenerateButton={false}
           initialApproved={approvalConfirmed}
           packetVersion={packetVersion ?? 1}
           prePacketApproval

@@ -21,7 +21,10 @@ export type PensionerAgeAssessment = {
   ageAtTaxYearStart: number | null;
   /** Age on the last day of the tax year, when a date of birth is known. */
   ageAtTaxYearEnd: number | null;
-  /** True only when the taxpayer was below 70 for the whole tax year. */
+  /**
+   * True when the taxpayer was below 70 on the first day of the tax year:
+   * BELOW_70, or TURNS_70_DURING_YEAR under the confirmed first-day rule.
+   */
   isBelow70: boolean;
   /** Operator-facing explanation used when a route cannot be calculated. */
   reason: string;
@@ -90,11 +93,14 @@ function buildUtcDate(year: number, month: number, day: number): Date | null {
 }
 
 /**
- * Decides whether a pensioner was below 70 for an entire tax year.
+ * Decides the Section 149(IA) age test for a pensioner.
  *
- * A taxpayer who turns 70 during the year is neither clearly "below 70" nor
- * clearly covered by an absent rule, so that case is reported separately and
- * must not be calculated from the below-70 row.
+ * Confirmed first-day rule (Option A): age is tested on the first day of the
+ * tax year, following the Ordinance's own tradition for age tests (the former
+ * 60+ relief applied to a taxpayer "aged 60 years or more on the first day of
+ * that tax year"). A taxpayer who turns 70 during the year was 69 on the
+ * first day, so the below-70 row applies for the whole year; the bracket
+ * still reports TURNS_70_DURING_YEAR so the birthday stays visible.
  */
 export function assessPensionerAge(input: {
   taxYear: number;
@@ -149,7 +155,7 @@ export function assessPensionerAge(input: {
     bracket: "TURNS_70_DURING_YEAR",
     ageAtTaxYearStart,
     ageAtTaxYearEnd,
-    isBelow70: false,
-    reason: `Pensioner turns 70 during Tax Year ${input.taxYear} (age ${ageAtTaxYearStart} at the start, ${ageAtTaxYearEnd} at the end). The rate card does not state how a mid-year seventieth birthday is apportioned, so confirmed rules are required.`,
+    isBelow70: true,
+    reason: `Pensioner turns 70 during Tax Year ${input.taxYear} (age ${ageAtTaxYearStart} at the start, ${ageAtTaxYearEnd} at the end). Per the confirmed first-day rule the below-70 row applies for the whole year.`,
   };
 }

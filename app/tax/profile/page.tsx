@@ -59,6 +59,11 @@ export default function ProfilePage() {
   const [errors, setErrors] = useState<FieldErrors>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // Full Name stays locked to the Google identity whenever a name arrived
+  // from the session or the saved profile. When NEITHER has a name, the
+  // field unlocks so the "required" rule can actually be satisfied —
+  // otherwise saving would be blocked forever by an uneditable field.
+  const [nameLocked, setNameLocked] = useState(true);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [removingAvatar, setRemovingAvatar] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -75,6 +80,7 @@ export default function ProfilePage() {
         fullName: prev.fullName || session.user?.name || "",
         email: prev.email || session.user?.email || "",
       }));
+      setNameLocked(Boolean(session.user?.name?.trim()));
       if (session.user.image && !avatarUrl) {
         setAvatarUrl(session.user.image);
       }
@@ -89,6 +95,9 @@ export default function ProfilePage() {
             fullName: res.user.fullName || prev.fullName,
             email: res.user.email || prev.email,
           }));
+          setNameLocked(
+            Boolean((res.user.fullName || session.user?.name || "").trim()),
+          );
           if (res.user.image) {
             setAvatarUrl(res.user.image);
           }
@@ -324,13 +333,21 @@ export default function ProfilePage() {
                     Full Name <span className="text-red-400">*</span>
                   </label>
                   <input
-                    className={inputCls("fullName", false, true)}
+                    className={inputCls("fullName", false, nameLocked)}
                     placeholder="Enter full name"
                     value={form.fullName}
-                    disabled
+                    disabled={nameLocked}
+                    onChange={(e) => set("fullName", e.target.value)}
                   />
-                  {errors.fullName && (
+                  {errors.fullName ? (
                     <p className={errCls}>{errors.fullName}</p>
+                  ) : (
+                    !nameLocked && (
+                      <p className={hintCls}>
+                        No name found on your Google account — please type
+                        it.
+                      </p>
+                    )
                   )}
                 </div>
                 <div className="grid grid-cols-2 gap-3">

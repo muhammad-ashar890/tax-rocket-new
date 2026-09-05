@@ -5,9 +5,9 @@ import { SiteHeader } from "@/components/site-header";
 import { NextAuthProvider } from "@/components/auth/NextAuthProvider";
 
 export const metadata: Metadata = {
-  title: "TaxRocket — Redesign Demo",
+  title: "TaxRocket",
   description:
-    "Standalone UX demo of the redesigned TaxRocket filing experience.",
+    "Guided FBR tax filing — uploads, reconciliation, approval, and supervised filing.",
 };
 
 export default function RootLayout({

@@ -29,6 +29,10 @@ type Props = Readonly<{
   draftId?: string;
   initialConnection: FbrConnectionView | null;
   onConnectionStatusChange?: (status: string) => void;
+  /** Key figures shown on the final submit gate, when known. */
+  taxPayable?: number | null;
+  refundDue?: number | null;
+  packetVersion?: number;
 }>;
 
 type DesktopSession = {
@@ -103,6 +107,15 @@ function flowStepForPhase(phase: Phase): FlowStep {
   return "resume";
 }
 
+function isFinalSubmitPause(pauseAction: string | null) {
+  const action = (pauseAction || "").toLowerCase();
+  return (
+    action.includes("final_submit") ||
+    action.includes("final_review") ||
+    action.includes("classic_final")
+  );
+}
+
 function chipClass(isDone: boolean, isCurrent: boolean) {
   if (isDone) return "border-green-200 bg-green-50 text-green-800";
   if (isCurrent) return "border-amanah/30 bg-amanah/5 text-foreground";
@@ -113,6 +126,9 @@ export default function FbrConnectClient({
   draftId,
   initialConnection,
   onConnectionStatusChange,
+  taxPayable,
+  refundDue,
+  packetVersion,
 }: Props) {
   const [connection, setConnection] = useState(initialConnection);
   const [session, setSession] = useState<DesktopSession | null>(null);
@@ -123,6 +139,7 @@ export default function FbrConnectClient({
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [startOver, setStartOver] = useState(false);
   const [installedAck, setInstalledAck] = useState(false);
+  const [submitGateOpen, setSubmitGateOpen] = useState(true);
 
   useEffect(() => {
     setConnection(initialConnection);
@@ -250,11 +267,12 @@ export default function FbrConnectClient({
     }
   }
 
-  async function handleResumeJob(jobId: string) {
+  async function handleResumeJob(jobId: string, finalSubmitConfirmed = false) {
     setActionLoading(jobId);
     const result = await resumeJobAfterPauseAction(jobId, {
       resumedAt: new Date().toISOString(),
       confirmedBy: "user",
+      ...(finalSubmitConfirmed ? { finalSubmitConfirmed: true } : {}),
     });
     setActionLoading(null);
     if (!result.success) {
@@ -285,6 +303,12 @@ export default function FbrConnectClient({
 
   const activeFlowStep = flowStepForPhase(phase);
   const activeIndex = FLOW_ORDER.indexOf(activeFlowStep);
+
+  // A fresh pause (or a fresh job) always reopens the gate: "Not now" must
+  // never carry over to a later submit question.
+  useEffect(() => {
+    setSubmitGateOpen(true);
+  }, [activeJob?.id, activeJob?.pauseAction]);
 
   return (
     <div className="space-y-5">
@@ -415,13 +439,119 @@ export default function FbrConnectClient({
         </Card>
       )}
 
-      {phase === "resume" && activeJob && (
-        <Card className="border-amber-200">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-sm text-amber-800">
-              <CheckCircle className="h-4 w-4" /> Step 3 — Continue
-            </CardTitle>
-          </CardHeader>
+      {phase === "resume" &&
+        activeJob &&
+        isFinalSubmitPause(activeJob.pauseAction) &&
+        submitGateOpen && (
+          <Card data-testid="final-submit-gate" className="border-red-200">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm text-red-800">
+                <ShieldCheck className="h-4 w-4" /> Final gate — Submit this
+                return to FBR?
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <p>
+                The agent has filled your return in IRIS and is waiting at the
+                final submit step. Nothing is submitted until you choose.
+              </p>
+              {(taxPayable != null ||
+                refundDue != null ||
+                packetVersion != null) && (
+                <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                  {packetVersion != null && (
+                    <p>Packet version: v{packetVersion}</p>
+                  )}
+                  {taxPayable != null && (
+                    <p>
+                      Tax payable: PKR{" "}
+                      {Math.round(taxPayable).toLocaleString()}
+                    </p>
+                  )}
+                  {refundDue != null && (
+                    <p>
+                      Refund due: PKR {Math.round(refundDue).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+              )}
+              <p className="text-xs font-medium text-red-800">
+                Submitting is final in IRIS. Choose only after reviewing the
+                figures above.
+              </p>
+              {activeJob.pauseMessage && (
+                <p className="text-muted-foreground">
+                  {activeJob.pauseMessage}
+                </p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  data-testid="final-submit-yes"
+                  disabled={actionLoading === activeJob.id}
+                  onClick={() => handleResumeJob(activeJob.id, true)}
+                  className="gap-2"
+                >
+                  {actionLoading === activeJob.id ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <CheckCircle className="h-3.5 w-3.5" />
+                  )}
+                  Yes, submit to FBR
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  data-testid="final-submit-no"
+                  disabled={actionLoading === activeJob.id}
+                  onClick={() => setSubmitGateOpen(false)}
+                >
+                  Not now
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={actionLoading === activeJob.id}
+                  onClick={() => handleCancelJob(activeJob.id)}
+                >
+                  Cancel this filing
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+      {phase === "resume" &&
+        activeJob &&
+        isFinalSubmitPause(activeJob.pauseAction) &&
+        !submitGateOpen && (
+          <Card className="border-amber-200">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm text-amber-800">
+                <CheckCircle className="h-4 w-4" /> Submission waiting
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <p className="text-muted-foreground">
+                The return is still waiting at the final submit step. Nothing
+                has been submitted.
+              </p>
+              <Button size="sm" onClick={() => setSubmitGateOpen(true)}>
+                Review the submit gate
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+      {phase === "resume" &&
+        activeJob &&
+        !isFinalSubmitPause(activeJob.pauseAction) && (
+          <Card className="border-amber-200">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm text-amber-800">
+                <CheckCircle className="h-4 w-4" /> Step 3 — Continue
+              </CardTitle>
+            </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p>
               {PAUSE_LABELS[activeJob.pauseAction || ""] ??

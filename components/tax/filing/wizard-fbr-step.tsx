@@ -13,11 +13,17 @@ import { StepHeading } from "@/components/tax/wizard-ui";
 type WizardFbrStepProps = Readonly<{
   draftId?: string;
   onConnectionStatusChange?: (status: string) => void;
+  taxPayable?: number | null;
+  refundDue?: number | null;
+  packetVersion?: number;
 }>;
 
 export function WizardFbrStep({
   draftId,
   onConnectionStatusChange,
+  taxPayable,
+  refundDue,
+  packetVersion,
 }: WizardFbrStepProps) {
   const [connection, setConnection] = useState<FbrConnectionView | null>(null);
 
@@ -63,6 +69,9 @@ export function WizardFbrStep({
         draftId={draftId}
         initialConnection={connection}
         onConnectionStatusChange={onConnectionStatusChange}
+        taxPayable={taxPayable}
+        refundDue={refundDue}
+        packetVersion={packetVersion}
       />
     </div>
   );
