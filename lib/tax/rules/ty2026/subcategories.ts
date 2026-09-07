@@ -132,7 +132,7 @@ export const TY2026_SUBCATEGORY_STEPS: readonly Ty2026SubcategoryStepDefinition[
       title: "Which pension situations apply?",
       railLabel: "Pension categories",
       description:
-        "One question only - amount and age bands are calculated automatically from your pension records and date of birth.",
+        "Optional - skip if none apply. Amount and age bands are calculated automatically from your pension records and date of birth.",
     },
     {
       key: "subcategory_property_rent",

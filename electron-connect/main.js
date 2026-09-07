@@ -200,7 +200,17 @@ async function navigateIrisTopMenu(
     );
   } catch (error) {
     // Fall back to legacy single-selector approach
-    await clickSelector(windowInstance, routeSelector.topMenuSelector);
+    try {
+      await clickSelector(windowInstance, routeSelector.topMenuSelector);
+    } catch {
+      // Real IRIS 2.0: selectors may carry "text:Declaration" style
+      // alternatives — clickSelector resolves those by visible text.
+      await clickSelectorWithTextSupport(
+        windowInstance,
+        routeSelector.topMenuSelector,
+        15000,
+      );
+    }
   }
 
   // Wait for the left category panel to load
@@ -235,7 +245,17 @@ async function navigateIrisLeftCategory(
       driftContext,
     );
   } catch (error) {
-    await clickSelector(windowInstance, routeSelector.leftCategorySelector);
+    try {
+      await clickSelector(windowInstance, routeSelector.leftCategorySelector);
+    } catch {
+      // Real IRIS 2.0: "text:Income Tax Return" style alternatives are
+      // resolved by visible text.
+      await clickSelectorWithTextSupport(
+        windowInstance,
+        routeSelector.leftCategorySelector,
+        15000,
+      );
+    }
   }
 
   await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -292,7 +312,8 @@ async function navigateIrisFormList(windowInstance, routeSelector, formLabel) {
     return false;
   }
 
-  // Try exact selector first
+  // Try exact selector first (supports "text:Label" alternatives for
+  // the real IRIS 2.0 portal).
   try {
     await clickSelector(windowInstance, routeSelector.formSelector);
     return true;
@@ -302,10 +323,11 @@ async function navigateIrisFormList(windowInstance, routeSelector, formLabel) {
 
   // Fuzzy matching: find a link/button whose text contains the form label
   if (formLabel) {
-    const fuzzySelector = `a:has-text("${formLabel.replace(/"/g, '\\"')}"), button:has-text("${formLabel.replace(/"/g, '\\"')}")`;
     try {
-      await clickSelector(windowInstance, fuzzySelector);
-      return true;
+      const clicked = await findAndClickByText(windowInstance, [formLabel]);
+      if (clicked) {
+        return true;
+      }
     } catch {
       // Fall through
     }
@@ -736,6 +758,17 @@ async function verifyCompletionEvidence(windowInstance, routeSelector) {
 }
 
 function resolveMockIrisUrl(value) {
+  // Real-IRIS sessions must never open local mock fixtures. When the launch
+  // handoff configured a real portal login URL, any mock-iris:// stage URL
+  // (e.g. from a stale job context) resolves to the real IRIS root instead.
+  const configuredLoginUrl = launchState.desktopAuthConfig?.loginUrl || "";
+  if (
+    launchState.flow === "fbr" &&
+    /^https?:\/\//i.test(configuredLoginUrl) &&
+    String(value).startsWith("mock-iris://")
+  ) {
+    return configuredLoginUrl;
+  }
   switch (value) {
     case "mock-iris://login":
       return getMockIrisFile("login.html");
@@ -1335,8 +1368,255 @@ async function fillSelector(windowInstance, selector, value) {
   `);
 }
 
+/**
+ * IRIS 2.0 real-portal support: text-based element matching.
+ * Real IRIS uses generated ids/classes, but visible labels ("Declaration",
+ * "114(1) (Return of Income...)") are stable. Selectors may carry
+ * "text:Some Label" alternatives that are resolved by visible text.
+ */
+async function findAndClickByText(windowInstance, candidates) {
+  const list = (candidates || [])
+    .map((c) => String(c).trim().toLowerCase())
+    .filter(Boolean);
+  if (list.length === 0) return false;
+  return await windowInstance.webContents.executeJavaScript(
+    `(() => {
+      const candidates = ${JSON.stringify(list)};
+      const elements = Array.from(
+        document.querySelectorAll('a, button, [role="button"], [role="menuitem"], [role="tab"], li, td, th, span, p, h1, h2, h3, h4, label')
+      );
+      const visible = elements.filter((el) => {
+        const text = (el.textContent || '').trim().toLowerCase();
+        if (!text || text.length > 140) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = getComputedStyle(el);
+        if (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none') return false;
+        return candidates.some((c) => text === c || text.includes(c));
+      });
+      // Prefer the deepest/shortest match so we click the leaf control,
+      // not a wrapper card containing half the page.
+      visible.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+      const target = visible[0];
+      if (!target) return false;
+      target.scrollIntoView({ block: 'center' });
+      target.click();
+      return true;
+    })()`,
+  );
+}
+
+function splitSelectorAlternatives(selector) {
+  return String(selector || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Click a selector that may mix CSS alternatives with `text:Label`
+ * alternatives. CSS parts are tried first, then text parts, polling until
+ * the timeout. This is the real-IRIS-safe variant of clickSelector.
+ */
+async function clickSelectorWithTextSupport(windowInstance, selector, timeoutMs = 15000) {
+  const parts = splitSelectorAlternatives(selector);
+  const textParts = parts
+    .filter((part) => part.toLowerCase().startsWith("text:"))
+    .map((part) => part.slice(5).trim())
+    .filter(Boolean);
+  const cssParts = parts.filter((part) => !part.toLowerCase().startsWith("text:"));
+  const start = Date.now();
+
+  if (cssParts.length > 0) {
+    try {
+      await waitForVisibleSelector(windowInstance, cssParts.join(","), timeoutMs);
+    } catch {
+      // CSS parts may simply not exist on the real portal; text parts below
+      // are the ones that matter there.
+    }
+  }
+
+  // Fast path: a CSS part is immediately available.
+  if (cssParts.length > 0) {
+    const clicked = await windowInstance.webContents.executeJavaScript(
+      `(() => {
+        const el = document.querySelector(${JSON.stringify(cssParts.join(","))});
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        el.scrollIntoView({ block: 'center' });
+        el.click();
+        return true;
+      })()`,
+    ).catch(() => false);
+    if (clicked) return;
+  }
+
+  while (Date.now() - start < timeoutMs) {
+    if (cssParts.length > 0) {
+      const clicked = await windowInstance.webContents.executeJavaScript(
+        `(() => {
+          const el = document.querySelector(${JSON.stringify(cssParts.join(","))});
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          el.scrollIntoView({ block: 'center' });
+          el.click();
+          return true;
+        })()`,
+      ).catch(() => false);
+      if (clicked) return;
+    }
+    if (textParts.length > 0) {
+      const clicked = await findAndClickByText(windowInstance, textParts).catch(() => false);
+      if (clicked) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+  throw new Error("Missing selector: " + selector);
+}
+
+/**
+ * Detect the IRIS login form. On the real portal the session does not always
+ * carry into the worker window, and the readiness URL (portal root) then
+ * renders the login screen — the pilot must not mistake that for a
+ * "trusted session confirmed".
+ */
+async function isIrisLoginFormVisible(windowInstance) {
+  return await windowInstance.webContents.executeJavaScript(
+    `(() => {
+      const inputs = Array.from(document.querySelectorAll('input[type="password"]'));
+      const visible = inputs.filter((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 &&
+          style.visibility !== 'hidden' && style.display !== 'none';
+      });
+      if (visible.length === 0) return false;
+      const pageText = (document.body.innerText || '').toLowerCase();
+      return pageText.includes('login') || pageText.includes('forgot password') ||
+        pageText.includes('password');
+    })()`,
+  ).catch(() => false);
+}
+
+/**
+ * Wait (up to timeoutMs) for the user to complete the IRIS login inside the
+ * worker window. Returns true as soon as the login form disappears.
+ */
+async function waitForIrisLogin(windowInstance, timeoutMs = 5 * 60 * 1000) {
+  const pollMs = 2500;
+  const start = Date.now();
+  let announced = false;
+  while (Date.now() - start < timeoutMs) {
+    const needsLogin = await isIrisLoginFormVisible(windowInstance);
+    if (!needsLogin) return true;
+    if (!announced) {
+      announced = true;
+      pushStatus(
+        "progress",
+        "IRIS login required: log in (CNIC/NTN + password + captcha) inside the agent return window, then wait here.",
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  return false;
+}
+
+/**
+ * Dismiss the IRIS 2.0 welcome/promotional popup that overlays the dashboard
+ * after login ("Submit Your Income Tax Return ... LAST DATE ..." card).
+ * The popup is typically a jQuery-UI style dialog whose close control is the
+ * small (x) icon in the dialog title bar; ESC usually closes it too.
+ */
+async function dismissIrisWelcomePopup(windowInstance) {
+  const attempt = await windowInstance.webContents.executeJavaScript(
+    `(() => {
+      const clickEl = (el) => {
+        try { el.scrollIntoView({ block: 'center' }); el.click(); return true; }
+        catch { return false; }
+      };
+      // Pass 1: known close-control selectors (broad, case-insensitive).
+      const closeSelectors = [
+        '.ui-dialog-titlebar-close', '[aria-label*="lose" i]',
+        '[data-dismiss="modal"]', '[data-bs-dismiss="modal"]',
+        'button[class*="close" i]', 'span[class*="close" i]',
+        'img[class*="close" i]', 'i[class*="close" i]', 'a[class*="close" i]',
+        '[class*="closeIcon" i]', '[class*="close-icon" i]',
+        '[class*="closeBtn" i]', '[class*="close-btn" i]'
+      ];
+      for (const sel of closeSelectors) {
+        for (const el of document.querySelectorAll(sel)) {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          if (rect.width > 0 && rect.height > 0 &&
+              style.display !== 'none' && style.visibility !== 'hidden') {
+            if (clickEl(el)) return 'selector:' + sel;
+          }
+        }
+      }
+      // Pass 2: find overlay dialog cards and click the small control at
+      // their top-right corner (the IRIS popup's (x) is an image/icon there).
+      const cards = Array.from(document.querySelectorAll('div, section')).filter((d) => {
+        const s = getComputedStyle(d);
+        return (s.position === 'fixed' || s.position === 'absolute') &&
+          d.offsetWidth > 300 && d.offsetHeight > 200;
+      });
+      cards.sort((a, b) =>
+        (parseInt(getComputedStyle(b).zIndex) || 0) -
+        (parseInt(getComputedStyle(a).zIndex) || 0));
+      for (const card of cards.slice(0, 5)) {
+        const cardRect = card.getBoundingClientRect();
+        const clickables = Array.from(card.querySelectorAll(
+          'a, button, img, [role="button"], span[onclick], i, svg'));
+        let best = null;
+        let bestDist = Infinity;
+        for (const el of clickables) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) continue;
+          if (rect.width > 90 || rect.height > 90) continue; // close icon is small
+          const dx = (cardRect.right - 26) - (rect.left + rect.width / 2);
+          const dy = (rect.top + rect.height / 2) - (cardRect.top + 26);
+          const dist = Math.hypot(dx, dy);
+          if (dist < bestDist) { bestDist = dist; best = el; }
+        }
+        if (best && bestDist < 90) {
+          const how = 'corner:' + best.tagName + ':' + String(best.className || '').slice(0, 40);
+          clickEl(best);
+          return how;
+        }
+      }
+      // Pass 3: hide the overlay/mask entirely so the dashboard is clickable.
+      let hidden = 0;
+      for (const card of cards) { card.style.display = 'none'; hidden++; }
+      const masks = document.querySelectorAll(
+        '.ui-widget-overlay, .modal-backdrop, [class*="overlay" i], [class*="mask" i]');
+      for (const mask of masks) {
+        const rect = mask.getBoundingClientRect();
+        if (rect.width > 200 && rect.height > 150) { mask.style.display = 'none'; hidden++; }
+      }
+      return hidden > 0 ? 'hidden:' + hidden : null;
+    })()`,
+  ).catch(() => null);
+
+  if (attempt) return attempt;
+
+  // ESC fallback: many IRIS dialogs close on Escape.
+  for (let i = 0; i < 2; i++) {
+    windowInstance.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
+    windowInstance.webContents.sendInputEvent({ type: "keyUp", keyCode: "Escape" });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return "esc";
+}
+
 async function clickSelector(windowInstance, selector) {
   if (!selector) {
+    return;
+  }
+
+  if (String(selector).toLowerCase().includes("text:")) {
+    await clickSelectorWithTextSupport(windowInstance, selector);
     return;
   }
 
@@ -2863,6 +3143,37 @@ async function pauseAssistedPilot(job, windowInstance, input) {
   const captures = [
     await captureWindowScreenshot(windowInstance, input.captureLabel),
   ];
+  // Real-portal evidence: dump the worker page's HTML + screenshot at every
+  // pause so the live portal's DOM can be mapped without waiting for a
+  // hard failure. Files land under userData/jobs/<jobId>/.
+  try {
+    const fsMod = await import("fs/promises");
+    const dumpDir = getWorkerTempDir(job.id);
+    await fsMod.mkdir(dumpDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const pageUrl = windowInstance.webContents.getURL();
+    const html = await windowInstance.webContents.executeJavaScript(
+      "document.documentElement.outerHTML",
+    );
+    if (html) {
+      await fsMod.writeFile(
+        path.join(dumpDir, `pause-${input.requiredAction}-${stamp}.html`),
+        html,
+        "utf8",
+      );
+    }
+    await fsMod.writeFile(
+      path.join(dumpDir, `pause-${input.requiredAction}-${stamp}.json`),
+      JSON.stringify({ jobId: job.id, requiredAction: input.requiredAction, pageUrl, at: stamp }, null, 2),
+      "utf8",
+    );
+    pushStatus(
+      "progress",
+      `Pause evidence saved: ${path.join(dumpDir, `pause-${input.requiredAction}-${stamp}.html`)}`,
+    );
+  } catch {
+    // Evidence capture is best-effort; never block the pause itself.
+  }
   await updateLocalJobStatus(job.id, "awaiting_user_action", {
     pauseAction: input.requiredAction,
     pauseMessage: input.pauseReason || input.message,
@@ -2922,12 +3233,39 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   if (shouldFillReturn) {
   await windowInstance.loadURL(dashboardUrl);
   await waitForVisibleSelector(windowInstance, readySelector, 15000);
+  // Real portal: if the IRIS login form is showing, the trusted session did
+  // not carry into this window — wait for the user to log in here instead of
+  // pretending the session was confirmed.
+  if (!config.useMockIris) {
+    const loggedIn = await waitForIrisLogin(windowInstance);
+    if (!loggedIn) {
+      throw new Error(
+        "IRIS login was not completed in the agent window. Restart the filing and complete the login (CNIC/NTN, password, captcha) inside the return window.",
+      );
+    }
+  }
   executionLog.push({
     step: STANDARD_LOG_STEPS.READINESS_CHECK,
     label: "Trusted Iris session confirmed",
     detail:
       "Desktop worker validated the trusted local Iris session before entering the live pilot.",
   });
+
+    // IRIS 2.0 shows a promotional popup over the dashboard after login.
+    // It must be dismissed or it swallows every later click.
+    if (!config.useMockIris) {
+      let dismissedHow = null;
+      for (let popupTry = 0; popupTry < 3; popupTry++) {
+        dismissedHow = await dismissIrisWelcomePopup(windowInstance);
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        if (dismissedHow && dismissedHow !== "esc") break;
+      }
+      executionLog.push({
+        step: "welcome_popup_dismissed",
+        label: "IRIS welcome popup dismissed",
+        detail: `Dashboard popup closed via ${dismissedHow || "no attempt"}.`,
+      });
+    }
 
     captures.push(
       await captureWindowScreenshot(
@@ -3432,6 +3770,66 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   };
 }
 
+/**
+ * Failure evidence dump: when a job fails, save the worker page's full HTML,
+ * its URL, and a screenshot under userData/jobs/<jobId>/. This is the ground
+ * truth needed to write real-portal selectors without guessing.
+ * Returns the dump folder path (also embedded into the error message).
+ */
+async function saveFailureDump(job, error) {
+  try {
+    const fsMod = await import("fs/promises");
+    const dumpDir = getWorkerTempDir(job.id);
+    await fsMod.mkdir(dumpDir, { recursive: true });
+    const info = {
+      jobId: job.id,
+      jobType: job.type,
+      error: error instanceof Error ? error.message : String(error),
+      dumpedAt: new Date().toISOString(),
+    };
+    if (workerWindow && !workerWindow.isDestroyed()) {
+      try {
+        info.pageUrl = workerWindow.webContents.getURL();
+        info.pageTitle = await workerWindow.webContents.getTitle();
+        const html = await workerWindow.webContents.executeJavaScript(
+          "document.documentElement.outerHTML",
+        );
+        if (html) {
+          await fsMod.writeFile(
+            path.join(dumpDir, "failure-page.html"),
+            html,
+            "utf8",
+          );
+        }
+        try {
+          const shot = await workerWindow.webContents.capturePage();
+          await fsMod.writeFile(
+            path.join(dumpDir, "failure-screenshot.png"),
+            shot.toPNG(),
+          );
+        } catch {}
+      } catch {}
+    }
+    await fsMod.writeFile(
+      path.join(dumpDir, "failure-info.json"),
+      JSON.stringify(info, null, 2),
+      "utf8",
+    );
+    pushStatus(
+      "error",
+      `Job failed. Evidence saved in folder: ${dumpDir} (failure-page.html, failure-screenshot.png, failure-info.json).`,
+    );
+    return dumpDir;
+  } catch (dumpError) {
+    pushStatus(
+      "error",
+      "Job failed and the evidence dump could not be written: " +
+        (dumpError instanceof Error ? dumpError.message : String(dumpError)),
+    );
+    return null;
+  }
+}
+
 async function processLocalJob(job) {
   if (job.status === "awaiting_user_action") {
     return;
@@ -3480,6 +3878,10 @@ async function processLocalJob(job) {
       error instanceof Error
         ? error.message
         : "The local desktop automation failed unexpectedly.";
+    const failureDumpDir = await saveFailureDump(job, error);
+    const messageWithDump = failureDumpDir
+      ? `${message} [Evidence: ${failureDumpDir}]`
+      : message;
     const failureExecutionLog = [
       {
         step: STANDARD_LOG_STEPS.FAILURE,
@@ -3527,7 +3929,7 @@ async function processLocalJob(job) {
       context,
     );
     await updateLocalJobStatus(job.id, "failed", {
-      errorMessage: message,
+      errorMessage: messageWithDump,
       result: {
         selectorBundle: getSelectorBundleSignal(context),
         selectorDriftDiagnostics,

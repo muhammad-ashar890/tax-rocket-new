@@ -106,9 +106,9 @@ import { useFilingFinalization } from "@/components/tax/filing/hooks/use-filing-
 // Pilot goes live on TY2026 only; if the calendar has moved past the last
 // supported year, fall back to it so the selector never opens on a year the
 // server will reject.
-const currentTaxYear = (
-  SUPPORTED_TAX_YEARS as readonly number[]
-).includes(new Date().getFullYear())
+const currentTaxYear = (SUPPORTED_TAX_YEARS as readonly number[]).includes(
+  new Date().getFullYear(),
+)
   ? new Date().getFullYear()
   : SUPPORTED_TAX_YEARS[0];
 
@@ -1213,9 +1213,14 @@ export function FilingWizard({
           furthestStepReached,
         );
         const hasRequiredCurrentState = isTy2026SubcategoryStepKey(key)
-          ? incomeSubcategorySelections.some(
-              (selection) => selection.source === getTy2026SourceForStep(key),
-            )
+          ? getTy2026SourceForStep(key) === "pension"
+            ? // Pension bands are auto-derived and the working question is
+              // optional, so reaching past the step is enough for its green
+              // check — an empty selection must not read as incomplete.
+              true
+            : incomeSubcategorySelections.some(
+                (selection) => selection.source === getTy2026SourceForStep(key),
+              )
           : key === "reconciliation"
             ? Boolean(reconciliationResolved)
             : key === "pipeline_review"
@@ -1606,6 +1611,20 @@ export function FilingWizard({
     if (currentStepKey === "pipeline_review" && !taxCalculatedInSession) {
       setFilingActionError(
         "Calculate the tax estimate before continuing to approval.",
+      );
+      return;
+    }
+
+    // Mirror of the server approval gate, surfaced on Review itself: while
+    // the duplicate-withholding warning stands unconfirmed, the filing must
+    // not move to approval (the server would refuse the packet anyway).
+    if (
+      currentStepKey === "pipeline_review" &&
+      withholdingWarning &&
+      !withholdingConfirmed
+    ) {
+      setFilingActionError(
+        "Confirm the duplicate-withholding check above before continuing: either exclude the duplicated salary-tax rows from the ledger or confirm they are separate payments.",
       );
       return;
     }

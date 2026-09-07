@@ -872,9 +872,7 @@ export async function deleteFilingDraftAction(draftId: string) {
     if (
       draft.status === FILING_STATUS.FILED ||
       draft.status === FILING_STATUS.APPROVED_FOR_FILING ||
-      draft.filingPackets.some(
-        (packet) => packet.fileUrl || packet.approvalStatus === "APPROVED",
-      )
+      draft.filingPackets.some((packet) => packet.approvalStatus === "APPROVED")
     ) {
       return {
         success: false,
@@ -913,9 +911,9 @@ export async function deleteFilingDraftAction(draftId: string) {
         if (path.isAbsolute(relativePath) || relativePath.startsWith("..")) {
           return Promise.resolve();
         }
-        return unlink(
-          path.join(process.cwd(), "uploads", relativePath),
-        ).catch(() => undefined);
+        return unlink(path.join(process.cwd(), "uploads", relativePath)).catch(
+          () => undefined,
+        );
       }),
     );
 

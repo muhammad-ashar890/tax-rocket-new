@@ -1,14 +1,18 @@
 /**
  * FBR Agent Config - Merged from old tax-rocket-old + new IRIS codes
- * 
+ *
  * This file combines:
  * - Old: Selector bundle for IRIS 2.0 (Angular) and Classic (PrimeFaces) DOM automation
  * - New: IRIS field codes from IRIS_System_Field_Codes_Extracted.csv (536 codes)
- * 
+ *
  * Used by Electron agent to fill IRIS fields
  */
 
-import { IRIS_CODES, CATEGORY_TO_IRIS_MAP, TAX_SECTION_TO_IRIS_CODE } from "./iris-field-codes";
+import {
+  IRIS_CODES,
+  CATEGORY_TO_IRIS_MAP,
+  TAX_SECTION_TO_IRIS_CODE,
+} from "./iris-field-codes";
 
 // Re-export IRIS codes for agent
 export { IRIS_CODES, CATEGORY_TO_IRIS_MAP, TAX_SECTION_TO_IRIS_CODE };
@@ -25,7 +29,9 @@ export type IrisRouteFamily =
   | "wealth_statement"
   | "pre_step_application";
 
-export function getPortalTypeForRouteFamily(routeFamily: IrisRouteFamily): IrisPortalType {
+export function getPortalTypeForRouteFamily(
+  routeFamily: IrisRouteFamily,
+): IrisPortalType {
   switch (routeFamily) {
     case "classic_individual_114":
       return "irisv1";
@@ -56,14 +62,22 @@ export type FbrDesktopAuthConfig = {
 };
 
 export function getFbrDesktopAuthConfig(): FbrDesktopAuthConfig {
-  const useMockIris = (process.env.FBR_USE_MOCK_IRIS?.trim() || "true").toLowerCase() !== "false";
-  const loginUrl = process.env.FBR_IRIS_LOGIN_URL?.trim() || "mock-iris://login";
+  const useMockIris =
+    (process.env.FBR_USE_MOCK_IRIS?.trim() || "true").toLowerCase() !== "false";
+  const loginUrl =
+    process.env.FBR_IRIS_LOGIN_URL?.trim() ||
+    // Real IRIS root opens the Taxpayer login screen directly.
+    (useMockIris ? "mock-iris://login" : "https://iris.fbr.gov.pk/");
 
   return {
     loginUrl,
-    readySelector: process.env.FBR_IRIS_READY_SELECTOR?.trim() || "#iris-dashboard-ready",
-    readyRejectSelector: process.env.FBR_IRIS_READY_REJECT_SELECTOR?.trim() || "#iris-password-reset-required",
-    readyUrlPattern: process.env.FBR_IRIS_READY_URL_PATTERN?.trim() || "/dashboard",
+    readySelector:
+      process.env.FBR_IRIS_READY_SELECTOR?.trim() || "#iris-dashboard-ready",
+    readyRejectSelector:
+      process.env.FBR_IRIS_READY_REJECT_SELECTOR?.trim() ||
+      "#iris-password-reset-required",
+    readyUrlPattern:
+      process.env.FBR_IRIS_READY_URL_PATTERN?.trim() || "/dashboard",
     useMockIris,
   };
 }
@@ -132,11 +146,14 @@ export type FbrPortalAutomationConfig = {
 
 // ─── Default Selector Bundle (from old repo v8-default-2026-05) ───
 
+// Real IRIS 2.0 (iris.fbr.gov.pk) renders generated ids/classes, but the
+// visible labels are stable. Each selector chain ends in "text:..." fallbacks
+// that the desktop agent resolves by matching visible text on the page.
 const COMMON_RETURN_SELECTORS: Omit<FbrRouteSelectorConfig, "formSelector"> = {
   topMenuSelector:
-    "#top-menu-income-tax-return, [data-iris-top-menu='income_tax_return'], a[href*='IncomeTaxReturn'], a[href*='income-tax-return']",
+    "#top-menu-income-tax-return, [data-iris-top-menu='income_tax_return'], a[href*='IncomeTaxReturn'], a[href*='income-tax-return'], text:Declaration",
   leftCategorySelector:
-    "#left-category-income-tax-return, [data-iris-left-category='income_tax_return'], a[href*='IncomeTaxReturn']",
+    "#left-category-income-tax-return, [data-iris-left-category='income_tax_return'], a[href*='IncomeTaxReturn'], text:Income Tax Return",
   formReadySelector:
     "#iris-return-form-ready, form[data-iris-form-ready='true'], #return-tax-form",
   periodSelector:
@@ -146,11 +163,13 @@ const COMMON_RETURN_SELECTORS: Omit<FbrRouteSelectorConfig, "formSelector"> = {
   generatePsidSelector: "#generate-psid, [data-action='generate-psid']",
   psidDisplaySelector: "#psid-number, [data-payment='psid-number']",
   psidDownloadSelector: "#download-psid, [data-action='download-psid']",
-  cprDisplaySelector: "#cpr-reference, #mock-cpr-reference, [data-payment='cpr-reference']",
+  cprDisplaySelector:
+    "#cpr-reference, #mock-cpr-reference, [data-payment='cpr-reference']",
   paidAmountSelector: "#paid-amount, [data-payment='paid-amount']",
   balancePayableSelector: "#balance-payable, [data-payment='balance-payable']",
   refundBannerSelector: "#refund-banner, [data-payment='refund-banner']",
-  submitButtonSelector: "#final-submit, button[data-action='submit-return'], button[type='submit']",
+  submitButtonSelector:
+    "#final-submit, button[data-action='submit-return'], button[type='submit']",
   completionConfirmSelector:
     "#completed-tasks-proof, [data-proof='completed-tasks'], [id*='completed-tasks']",
 };
@@ -159,22 +178,23 @@ export const DEFAULT_SELECTOR_BUNDLE = {
   id: "v8-default-2026-05-merged-with-iris-codes",
   version: 2,
   updatedAt: "2026-05-13T00:00:00.000Z",
-  notes: "Merged bundle: old v8 selectors + new IRIS field codes (1000, 2001, 500312, 64150301 etc) from IRIS_System_Field_Codes_Extracted.csv",
+  notes:
+    "Merged bundle: old v8 selectors + new IRIS field codes (1000, 2001, 500312, 64150301 etc) from IRIS_System_Field_Codes_Extracted.csv",
   routeSelectors: {
     simplified_salary_114i: {
       ...COMMON_RETURN_SELECTORS,
       formSelector:
-        "#form-114i, [data-iris-form='simplified_salary_114i'], [href*='114i'], [id*='114i']",
+        "#form-114i, [data-iris-form='simplified_salary_114i'], [href*='114i'], [id*='114i'], text:114(1), text:Income Tax Return",
     },
     normal_individual_114: {
       ...COMMON_RETURN_SELECTORS,
       formSelector:
-        "#form-114, [data-iris-form='normal_individual_114'], [href*='normal-individual-114'], [id='form-114-original']",
+        "#form-114, [data-iris-form='normal_individual_114'], [href*='normal-individual-114'], [id='form-114-original'], text:114(1), text:Return of Income filed voluntarily",
     },
     normal_individual_114_revised: {
       ...COMMON_RETURN_SELECTORS,
       formSelector:
-        "#form-114-revised, [data-iris-form='normal_individual_114_revised'], [href*='114'][href*='revised'], [id*='revised-114']",
+        "#form-114-revised, [data-iris-form='normal_individual_114_revised'], [href*='114'][href*='revised'], [id*='revised-114'], text:Revised, text:114(1)",
     },
     wealth_statement: {
       ...COMMON_RETURN_SELECTORS,
@@ -239,8 +259,17 @@ export async function getFbrPortalAutomationConfig(input?: {
     allowlist.push("iris.fbr.gov.pk");
   }
 
+  // Real IRIS is a SPA with no stable static routes for the supervised
+  // checkpoints (password reset, OTP/PIN, payment, final review). When the
+  // pilot runs against the real portal, every checkpoint stays on the IRIS
+  // root (the post-login dashboard) instead of the local mock fixtures.
+  const realIrisRoot = "https://iris.fbr.gov.pk/";
+  const stageUrl = (mockDefault: string, envValue?: string) =>
+    envValue?.trim() || (desktop.useMockIris ? mockDefault : realIrisRoot);
+
   const routeSelector =
-    input?.routeFamily && DEFAULT_SELECTOR_BUNDLE.routeSelectors[input.routeFamily]
+    input?.routeFamily &&
+    DEFAULT_SELECTOR_BUNDLE.routeSelectors[input.routeFamily]
       ? DEFAULT_SELECTOR_BUNDLE.routeSelectors[input.routeFamily]
       : null;
 
@@ -253,29 +282,61 @@ export async function getFbrPortalAutomationConfig(input?: {
       readyUrlPattern: desktop.readyUrlPattern,
     },
     dryRun: {
-      entryUrl: process.env.FBR_IRIS_DRY_RUN_URL?.trim() || "mock-iris://return",
+      entryUrl: stageUrl(
+        "mock-iris://return",
+        process.env.FBR_IRIS_DRY_RUN_URL,
+      ),
       reviewGateSelector:
-        process.env.FBR_IRIS_REVIEW_GATE_SELECTOR?.trim() || "#dry-run-review-gate",
+        process.env.FBR_IRIS_REVIEW_GATE_SELECTOR?.trim() ||
+        "#dry-run-review-gate",
       finalSubmitSelector:
         process.env.FBR_IRIS_FINAL_SUBMIT_SELECTOR?.trim() || "#final-submit",
       completedTasksSelector:
-        process.env.FBR_IRIS_COMPLETED_TASKS_SELECTOR?.trim() || "#completed-tasks-proof",
+        process.env.FBR_IRIS_COMPLETED_TASKS_SELECTOR?.trim() ||
+        "#completed-tasks-proof",
       pauseReason:
         process.env.FBR_IRIS_DRY_RUN_PAUSE_REASON?.trim() ||
         "Dry-run reached the final review gate. Final submit stays user controlled.",
     },
     assistedFiling: {
-      readinessUrl: process.env.FBR_IRIS_ASSISTED_READINESS_URL?.trim() || "mock-iris://dashboard",
-      passwordResetUrl: process.env.FBR_IRIS_PASSWORD_RESET_URL?.trim() || "mock-iris://password-reset",
-      otpCaptchaUrl: process.env.FBR_IRIS_OTP_CAPTCHA_URL?.trim() || "mock-iris://otp-captcha",
-      paymentUrl: process.env.FBR_IRIS_PAYMENT_URL?.trim() || "mock-iris://payment",
-      finalReviewUrl: process.env.FBR_IRIS_FINAL_REVIEW_URL?.trim() || "mock-iris://final-review",
-      completedTasksUrl: process.env.FBR_IRIS_COMPLETED_TASKS_URL?.trim() || "mock-iris://completed",
+      readinessUrl: stageUrl(
+        "mock-iris://dashboard",
+        process.env.FBR_IRIS_ASSISTED_READINESS_URL,
+      ),
+      passwordResetUrl: stageUrl(
+        "mock-iris://password-reset",
+        process.env.FBR_IRIS_PASSWORD_RESET_URL,
+      ),
+      otpCaptchaUrl: stageUrl(
+        "mock-iris://otp-captcha",
+        process.env.FBR_IRIS_OTP_CAPTCHA_URL,
+      ),
+      paymentUrl: stageUrl(
+        "mock-iris://payment",
+        process.env.FBR_IRIS_PAYMENT_URL,
+      ),
+      finalReviewUrl: stageUrl(
+        "mock-iris://final-review",
+        process.env.FBR_IRIS_FINAL_REVIEW_URL,
+      ),
+      completedTasksUrl: stageUrl(
+        "mock-iris://completed",
+        process.env.FBR_IRIS_COMPLETED_TASKS_URL,
+      ),
     },
     classicAssistedFiling: {
-      finalReviewUrl: process.env.FBR_IRIS_CLASSIC_FINAL_REVIEW_URL?.trim() || "mock-iris://classic-portal",
-      pinEntryUrl: process.env.FBR_IRIS_CLASSIC_PIN_URL?.trim() || "mock-iris://classic-pin",
-      completedTasksUrl: process.env.FBR_IRIS_CLASSIC_COMPLETED_TASKS_URL?.trim() || "mock-iris://classic-fixed-final-tax",
+      finalReviewUrl: stageUrl(
+        "mock-iris://classic-portal",
+        process.env.FBR_IRIS_CLASSIC_FINAL_REVIEW_URL,
+      ),
+      pinEntryUrl: stageUrl(
+        "mock-iris://classic-pin",
+        process.env.FBR_IRIS_CLASSIC_PIN_URL,
+      ),
+      completedTasksUrl: stageUrl(
+        "mock-iris://classic-fixed-final-tax",
+        process.env.FBR_IRIS_CLASSIC_COMPLETED_TASKS_URL,
+      ),
     },
     routeSelector,
     selectorBundle: {
@@ -339,7 +400,9 @@ export function buildPrimeFacesToolbarAction(
     submit: "correspondence:btnSubmit",
     cancel: "correspondence:btnCancle",
   };
-  const source = sourceMap[action] ?? `correspondence:btn${action.charAt(0).toUpperCase() + action.slice(1)}`;
+  const source =
+    sourceMap[action] ??
+    `correspondence:btn${action.charAt(0).toUpperCase() + action.slice(1)}`;
   return `PrimeFaces.ab({s:"${source}"});`;
 }
 
@@ -363,7 +426,11 @@ export function getIrisCodeForCategory(category: string): string | null {
  * Example: 149 -> 64020004, 236C -> 64150301, 236K -> 64151101
  */
 export function getIrisCodeForTaxSection(section: string): string | null {
-  return TAX_SECTION_TO_IRIS_CODE[section] || TAX_SECTION_TO_IRIS_CODE[section.toUpperCase()] || null;
+  return (
+    TAX_SECTION_TO_IRIS_CODE[section] ||
+    TAX_SECTION_TO_IRIS_CODE[section.toUpperCase()] ||
+    null
+  );
 }
 
 /**

@@ -176,24 +176,10 @@ export async function queueAssistedFilingJobAction(draftId: string) {
       };
     }
 
-    // For assisted filing, we should have completed dry run before
-    const lastDryRun = await prisma.localAgentJob.findFirst({
-      where: {
-        filingDraftId: draft.id,
-        userId: draft.userId,
-        jobType: JOB_TYPES.TAX_DRY_RUN,
-        status: JOB_STATUSES.COMPLETED,
-      },
-      orderBy: { completedAt: "desc" },
-    });
-
-    if (!lastDryRun) {
-      return {
-        success: false,
-        error:
-          "Complete a dry run first before assisted filing. This ensures fields are validated.",
-      };
-    }
+    // Dry-run prerequisite removed per client decision (2026-09-05): the
+    // pilot moves to real FBR IRIS testing, so assisted filing no longer
+    // requires a completed tax_dry_run job first. Field validation now
+    // happens live against the portal during the supervised run.
 
     const job = await prisma.localAgentJob.create({
       data: {

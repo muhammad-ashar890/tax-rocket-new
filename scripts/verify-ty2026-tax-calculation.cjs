@@ -1068,6 +1068,75 @@ check(
 );
 check("A one-route list has one line", soloViaList.breakdown.length, 1);
 
+// --- Mixed-regime excess withholding (section 29): the ambiguous refund -
+// Probe 3 replica: bank profit 1M (final 200k) + salary 500k (assessable 0),
+// 300k withheld. Formula refund stays 100k (final-first default), but the
+// excess must be flagged for CPR verification instead of silently claimed.
+
+const mixedExcess = multiEstimate(
+  [
+    { route: "salary", income: 500_000 },
+    {
+      route: "bank_profit",
+      income: 1_000_000,
+      subcategory: "bank-or-financial-institution-deposit",
+    },
+  ],
+  { taxWithheld: 300_000 },
+);
+
+check("mixed excess status", mixedExcess.status, "ESTIMATE");
+check("mixed excess finalTaxDue", mixedExcess.finalTaxDue, 200_000);
+check("mixed excess assessableTaxDue", mixedExcess.assessableTaxDue, 0);
+check("mixed excess refundDue", mixedExcess.refundDue, 100_000);
+check("mixed excess flagged", mixedExcess.mixedExcessWithholding, 100_000);
+check("mixed excess note", mixedExcess.note.includes("CPRs"), true);
+
+// Pure assessable excess: no ambiguity, no flag.
+const pureExcess = multiEstimate([{ route: "salary", income: 2_000_000 }], {
+  taxWithheld: 200_000,
+});
+check("pure excess status", pureExcess.status, "ESTIMATE");
+check("pure excess flagged", pureExcess.mixedExcessWithholding, 0);
+
+// All-final excess: existing final-tax path, no mixed flag.
+const finalExcess = multiEstimate(
+  [
+    {
+      route: "bank_profit",
+      income: 1_000_000,
+      subcategory: "bank-or-financial-institution-deposit",
+    },
+  ],
+  { taxWithheld: 300_000 },
+);
+check("all-final excess status", finalExcess.status, "ESTIMATE");
+check("all-final excess refund", finalExcess.refundDue, 0);
+check("all-final excess flagged", finalExcess.mixedExcessWithholding, 0);
+
+// --- Combined slab line identity (section 30) ------------------------------
+// Probe 5 replica: salary 3M + rent 3M price jointly on the clause-1 slab
+// (6M -> 1,790,000), but the line must say so instead of borrowing "salary".
+
+const combinedSlab = multiEstimate([
+  { route: "salary", income: 3_000_000 },
+  { route: "property_rent", income: 3_000_000 },
+]);
+
+check("combined slab status", combinedSlab.status, "ESTIMATE");
+check("combined slab single line", combinedSlab.breakdown.length, 1);
+check("combined slab route", combinedSlab.breakdown[0].route, "combined_slab");
+check("combined slab income", combinedSlab.breakdown[0].income, 6_000_000);
+check("combined slab tax", combinedSlab.breakdown[0].taxDue, 1_790_000);
+check(
+  "combined slab components",
+  JSON.stringify(combinedSlab.breakdown[0].combinedRoutes),
+  JSON.stringify([
+    { route: "salary", income: 3_000_000 },
+    { route: "property_rent", income: 3_000_000 },
+  ]),
+);
+
 if (failures.length > 0) {
   console.error("TY2026 tax-calculation checks FAILED:");
   for (const failure of failures) console.error(`  - ${failure}`);

@@ -91,7 +91,11 @@ export async function getFilingSummaryAction(draftId: string) {
     // Decimal columns arrive as Prisma Decimal instances; the wizard needs
     // plain numbers.
     const allBreakdown = calculationLines.map((line) => {
-      let details: { rateShape?: string; isFinalTax?: boolean } = {};
+      let details: {
+        rateShape?: string;
+        isFinalTax?: boolean;
+        combinedRoutes?: { route: string; income: number }[];
+      } = {};
       try {
         details = JSON.parse(line.detailsJson);
       } catch {
@@ -108,6 +112,7 @@ export async function getFilingSummaryAction(draftId: string) {
         taxDue: Number(line.calculatedTax),
         isFinalTax: details.isFinalTax === true,
         rateShape: details.rateShape ?? "PROGRESSIVE",
+        combinedRoutes: details.combinedRoutes ?? [],
       };
     });
 
@@ -132,6 +137,20 @@ export async function getFilingSummaryAction(draftId: string) {
     const assessableTaxDue = taxBreakdown
       .filter((line) => !line.isFinalTax)
       .reduce((total, line) => total + line.taxDue, 0);
+    // Mirror of the engine's mixed-regime excess flag (section 29). Derived
+    // from stored lines + scalars so no new DB column is needed.
+    const storedWithheld =
+      toMoneyNumberOrNull(currentDraft?.taxWithheld) ?? 0;
+    const storedDue = finalTaxDue + assessableTaxDue;
+    const everyStoredLineFinal =
+      taxBreakdown.length > 0 &&
+      taxBreakdown.every((line) => line.isFinalTax);
+    const mixedExcessWithholding =
+      !everyStoredLineFinal &&
+      finalTaxDue > 0 &&
+      storedWithheld - storedDue > 0
+        ? storedWithheld - storedDue
+        : 0;
 
     let incomeSources: string[] = [];
     try {
@@ -221,6 +240,7 @@ export async function getFilingSummaryAction(draftId: string) {
         taxBreakdown,
         finalTaxDue,
         assessableTaxDue,
+        mixedExcessWithholding,
         collectionBreakdown,
         collectionTaxDue,
       },

@@ -597,6 +597,7 @@ export async function calculateTaxAction(
           isFinalTax: line.isFinalTax,
           appliedRuleIds: line.appliedRuleIds,
           note: line.note,
+          combinedRoutes: line.combinedRoutes ?? [],
         }),
       };
     });

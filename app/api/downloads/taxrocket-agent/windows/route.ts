@@ -46,7 +46,7 @@ export async function GET() {
     {
       success: false,
       message:
-        "Installer .exe abhi build nahi hua. electron-connect folder mein npm run dist:win chalao.",
+        "Windows installer is not built yet. Run 'npm install' and then 'npm run dist:win' inside the electron-connect folder, or point TAXROCKET_AGENT_INSTALLER_PATH in .env at a pre-built .exe.",
       buildInstructions: {
         cwd: "electron-connect",
         install: "npm install",

@@ -552,3 +552,70 @@ Files: components/tax/filing/wizard-income-subcategory-step.tsx,
 lib/tax/rules/ty2026/subcategories.ts, components/tax/filing/filing-wizard.tsx,
 NEEDS_RULES_IMPLEMENTATION.md.
 Verified: tsc clean + 15/15 offline suites.
+
+## §29 Mixed-regime excess withholding flag (other-chat P0 #1, 2026-09-05)
+Other chat found (confirmed): mixed return + withholding above liability
+produced a silent refund claim although final-side over-deduction is never
+refundable — engine line was `refundDue = max(0, W - taxDue)`. No principled
+cap exists without per-route withholding allocation (W is one global number;
+any cap between formula and 0 would be invented, and 0 would kill legitimate
+salary refunds), so the fix surfaces the ambiguity instead of guessing:
+(a) engine returns mixedExcessWithholding (>0 only when mixed + excess) and a
+CPR-verification sentence in the note; refund formula unchanged (final-first
+default, now explicit); (b) filing-summary derives the same field from stored
+lines + scalars (NO new DB column); (c) review step shows an amber warning
+with the amount under the final-tax paragraph; (d) suite pins: Probe-3
+replica (bank 1M + salary 500k, W 300k) asserts refund 100k + flagged 100k +
+note mentions CPRs, pure-assessable and all-final excess assert flag 0.
+Exact per-route allocation stays a P2 feature (needs CPR-section inputs).
+Packet PDF untouched (prints no breakdown; still "snapshot for user review").
+Files: lib/tax/tax-calculation.ts, app/actions/filing-summary.ts,
+components/tax/filing/wizard-review-step.tsx,
+scripts/verify-ty2026-tax-calculation.cjs, NEEDS_RULES_IMPLEMENTATION.md.
+Verified: tsc clean + 15/15 offline suites (tax-calculation 172 assertions).
+
+## §30 Combined-slab line identity (other-chat P0 #4, 2026-09-05)
+
+Report §5: when two assessable progressive routes (their Probe 5: salary 3M +
+rent 3M) priced jointly on the clause-1 slab, the receipt borrowed the first
+source's identity plus its rule ID — "salary 6M / 149_SALARY_SLAB", rent
+invisible. The report asked for one joint-slab line with named components.
+
+Fix: the engine emits route `"combined_slab"` ("combined slab") with a
+structured `combinedRoutes: [{ route, income }]` list; action persists it in
+detailsJson (free-form — no migration); summary maps it through; review UI
+prints "Combined slab — Salary 3,000,000 + Property rent 3,000,000". Probe 5
+replica pinned: one line, income 6,000,000, taxDue 1,790,000. Per-route rule IDs
+stay impossible by construction (one computation); the components list is the
+traceability record instead. Deliberately NOT in ROUTE_ORDER (that map only
+orders ledger inputs) and NOT in the portal map (source-route enums only).
+Caught during implementation: ROUTE_RATE_SHAPES (Record over TaxRouteKey) also
+needed the new key, and the review step uses its own local TaxBreakdownLine
+duplicate (config's export feeds wizard props — both now carry the field).
+Files: lib/tax/tax-calculation.ts, app/actions/tax-calculation.ts,
+app/actions/filing-summary.ts, components/tax/filing/config/filing-wizard-config.ts,
+components/tax/filing/wizard-review-step.tsx,
+scripts/verify-ty2026-tax-calculation.cjs, NEEDS_RULES_IMPLEMENTATION.md.
+Verified: tsc clean + offline suites green (tax-calculation 178 assertions).
+
+## §31 #2 law verification (Ordinance amended to 31.07.2025, 2026-09-05)
+
+User chose law_first. All verified against reference/ITO-2025.pdf (persisted
+workspace copy of the FBR manual, 804pp):
+(a) 153(3) = MINIMUM tax on (1)+(2) (FA2019 final->minimum); only carve-outs
+are goods to manufacturer-co/listed public co (not minimum) and contracts to
+listed public co (adjustable). The 153(6)-final text is pre-2011 repealed law
+(FA2011-substitution footnote quote) — dead. S.169 final list has no 153
+(removed FA2020). E-commerce 153(2A) (FA2025): treatment unstated -> adjustable
+default (minor interpretive).
+(b) Rental: Division VIA block omitted FA2021 -> individual/AOP rental is NTR
+slab (engine combining lawful); 15A applies to "person" (FA2021) -> full
+deduction list (a) repairs 1/5, (b) insurance, (c) local taxes, (d) ground
+rent, (e) mortgage profit, (f) HBFC/bank share, (g) mortgage interest,
+(h) admin/collection max 4% (FA2020 six->four), (i) legal, (j) irrecoverable
+rent. Company-rental 15%-flat has NO Ordinance basis found -> separate ticket.
+(c) S.113: 1.25% general (Div IX), individuals/AOPs only at turnover >=100M
+(TY2017+). Below that N/A.
+Design consequence: 153 receipts -> max(153-min on gross, NTR slab on net);
+non-153 business -> pure NTR net; rental -> 15A net then slab. Needs per-route
+expense capture (pipeline gap: action reads only INCOME categories).

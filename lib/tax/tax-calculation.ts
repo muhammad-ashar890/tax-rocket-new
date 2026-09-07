@@ -25,7 +25,8 @@ export type TaxRouteKey =
   | "dividend"
   | "foreign_income_assets"
   | "imports"
-  | "advance_tax";
+  | "advance_tax"
+  | "combined_slab";
 
 /**
  * Routes whose lines price tax already collected at source rather than an
@@ -90,6 +91,12 @@ export type TaxRouteBreakdown = {
   /** Catalog rule IDs used to price this line. */
   appliedRuleIds: string[];
   note: string;
+  /**
+   * Only on combined_slab lines: each contributing route and its income.
+   * The joint slab has one computation, so per-route rule IDs cannot exist —
+   * this list is the traceability record (section 30).
+   */
+  combinedRoutes?: { route: TaxRouteKey; income: number }[];
 };
 
 /**
@@ -175,6 +182,14 @@ export type TaxCalculationResult = {
   finalTaxDue: number;
   /** Tax arising from routes that remain assessable. */
   assessableTaxDue: number;
+  /**
+   * Withholding above the calculated liability on a MIXED return (both
+   * final-tax and assessable lines). The excess may sit on either side and
+   * final-side over-deduction is never refundable, so anything above 0 here
+   * means the refund claim needs CPR verification. Always 0 on pure
+   * (single-regime) returns. See NEEDS_RULES_IMPLEMENTATION.md section 29.
+   */
+  mixedExcessWithholding: number;
   /**
    * Collection-route lines (imports, advance tax), in a stable order. These
    * price tax already collected at source and are reported separately so
@@ -1792,6 +1807,8 @@ const ROUTE_RATE_SHAPES: Record<
   // from its own declared figures, so they combine with anything.
   imports: "FLAT",
   advance_tax: "FLAT",
+  // The joint slab read is progressive by construction (section 30).
+  combined_slab: "PROGRESSIVE",
 };
 
 function resolveRouteShape(
@@ -1818,6 +1835,7 @@ const ROUTE_LABELS: Record<TaxRouteKey, string> = {
   foreign_income_assets: "payment to a non-resident",
   imports: "imports",
   advance_tax: "advance tax",
+  combined_slab: "combined slab",
 };
 
 /** Keeps breakdown lines and rule citations in a stable, predictable order. */
@@ -1892,6 +1910,7 @@ export function calculateTaxEstimate(input: {
     breakdown: [],
     finalTaxDue: 0,
     assessableTaxDue: 0,
+    mixedExcessWithholding: 0,
     collectionBreakdown: [],
     collectionTaxDue: 0,
   });
@@ -2046,9 +2065,13 @@ export function calculateTaxEstimate(input: {
     const combinedBase = Math.max(0, Math.round(computed.baseTax));
     const combinedSurcharge = Math.max(0, Math.round(computed.surcharge));
     combinedLine = {
-      route: combinableSources[0].route,
+      route: "combined_slab",
       rateShape: "PROGRESSIVE",
       income: Math.round(combinedIncome),
+      combinedRoutes: combinableSources.map((source) => ({
+        route: source.route,
+        income: Math.max(0, Math.round(source.income)),
+      })),
       baseTax: combinedBase,
       surcharge: combinedSurcharge,
       taxDue: combinedBase + combinedSurcharge,
@@ -2180,6 +2203,21 @@ export function calculateTaxEstimate(input: {
   const refundDue = everyLineIsFinal ? 0 : Math.max(0, taxWithheld - taxDue);
 
   const excessWithholding = Math.max(0, taxWithheld - taxDue);
+  // Mixed-regime excess (section 29): on a return with both final-tax and
+  // assessable lines, withholding above the total may sit on either side.
+  // Final-side over-deduction is never refundable, but the engine only sees
+  // one global withholding number (no per-route allocation yet), so it
+  // cannot prove which side holds the excess. The refund formula below keeps
+  // the final-first default; this field + note force the ambiguity into the
+  // open instead of silently claiming it.
+  const mixedExcessWithholding =
+    !everyLineIsFinal && finalTaxDue > 0 && excessWithholding > 0
+      ? excessWithholding
+      : 0;
+  const mixedExcessNote =
+    mixedExcessWithholding > 0
+      ? ` PKR ${mixedExcessWithholding.toLocaleString()} was withheld above the calculated liability on a mixed return (PKR ${finalTaxDue.toLocaleString()} of it final tax). Confirm via CPRs that the excess sits on adjustable withholding before claiming it as refund — final-tax over-deduction is not refundable.`
+      : "";
   const finalTaxNote =
     everyLineIsFinal && excessWithholding > 0
       ? ` PKR ${excessWithholding.toLocaleString()} was withheld above the calculated final tax; a refund is not claimed automatically and needs professional review.`
@@ -2225,12 +2263,16 @@ export function calculateTaxEstimate(input: {
     appliedRuleIds: [...breakdown, ...collectionBreakdown].flatMap(
       (line) => line.appliedRuleIds,
     ),
-    note: [`${combinedNote}${mixedRegimeNote}${finalTaxNote}`, collectionNote]
+    note: [
+      `${combinedNote}${mixedRegimeNote}${finalTaxNote}${mixedExcessNote}`,
+      collectionNote,
+    ]
       .filter(Boolean)
       .join(" "),
     breakdown,
     finalTaxDue,
     assessableTaxDue,
+    mixedExcessWithholding,
     collectionBreakdown,
     collectionTaxDue,
   };

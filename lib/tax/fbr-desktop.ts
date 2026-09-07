@@ -36,19 +36,34 @@ export function buildDesktopSessionConfig(params: {
 }): DesktopSessionConfig {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min
   const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
+  // Real IRIS root opens the Taxpayer login screen directly; there is no
+  // /login route on iris.fbr.gov.pk.
+  const irisLoginUrl =
+    process.env.FBR_IRIS_LOGIN_URL?.trim() || "https://iris.fbr.gov.pk/";
+  const irisReadySelector =
+    process.env.FBR_IRIS_READY_SELECTOR?.trim() || "body";
+  const readyUrlPattern =
+    process.env.FBR_IRIS_READY_URL_PATTERN?.trim() || "iris.fbr.gov.pk";
+
+  // The desktop agent reads loginUrl/readySelector/readyUrlPattern from the
+  // connect URL's query string (main.js resolveDesktopLoginUrl). If they are
+  // missing, it falls back to the local mock-iris fixture — so every
+  // handoff URL below must carry them explicitly.
+  const authParams =
+    `&loginUrl=${encodeURIComponent(irisLoginUrl)}` +
+    `&readySelector=${encodeURIComponent(irisReadySelector)}` +
+    `&readyUrlPattern=${encodeURIComponent(readyUrlPattern)}`;
 
   return {
     launchToken: params.launchToken,
     partitionKey: params.partitionKey,
     deviceTokenHash: params.deviceTokenHash,
-    deepLink: `taxrocket-connect://connect?token=${params.launchToken}&partition=${params.partitionKey}&apiBaseUrl=${encodeURIComponent(baseUrl)}&baseUrl=${encodeURIComponent(baseUrl)}&flow=fbr`,
-    localhostUrl: `http://127.0.0.1:37219/connect?token=${params.launchToken}&partition=${params.partitionKey}&apiBaseUrl=${encodeURIComponent(baseUrl)}&flow=fbr`,
+    deepLink: `taxrocket-connect://connect?token=${params.launchToken}&partition=${params.partitionKey}&apiBaseUrl=${encodeURIComponent(baseUrl)}&baseUrl=${encodeURIComponent(baseUrl)}&flow=fbr${authParams}`,
+    localhostUrl: `http://127.0.0.1:37219/connect?token=${params.launchToken}&partition=${params.partitionKey}&apiBaseUrl=${encodeURIComponent(baseUrl)}&flow=fbr${authParams}`,
     expiresAt,
-    irisLoginUrl:
-      process.env.FBR_IRIS_LOGIN_URL || "https://iris.fbr.gov.pk/login",
-    irisReadySelector: process.env.FBR_IRIS_READY_SELECTOR || "body",
-    readyUrlPattern:
-      process.env.FBR_IRIS_READY_URL_PATTERN || "iris.fbr.gov.pk",
+    irisLoginUrl,
+    irisReadySelector,
+    readyUrlPattern,
   };
 }
 

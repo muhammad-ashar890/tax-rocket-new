@@ -125,6 +125,7 @@ export type TaxBreakdownLine = {
   /** Charged under a final-tax section, so excess deduction is not refundable. */
   isFinalTax: boolean;
   rateShape: string;
+  combinedRoutes?: { route: string; income: number }[];
 };
 
 export type FilingSummary = {

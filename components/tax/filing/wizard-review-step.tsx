@@ -20,6 +20,7 @@ type TaxBreakdownLine = {
   taxDue: number;
   isFinalTax: boolean;
   rateShape: string;
+  combinedRoutes?: { route: string; income: number }[];
 };
 
 type FilingSummary = {
@@ -39,6 +40,7 @@ type FilingSummary = {
   taxBreakdown?: TaxBreakdownLine[];
   finalTaxDue?: number;
   assessableTaxDue?: number;
+  mixedExcessWithholding?: number;
   collectionBreakdown?: TaxBreakdownLine[];
   collectionTaxDue?: number;
 };
@@ -56,6 +58,7 @@ const SOURCE_LABELS: Record<string, string> = {
   foreign_income_assets: "Non-Resident",
   imports: "Imports",
   advance_tax: "Advance tax",
+  combined_slab: "Combined slab",
 };
 
 function sourceLabel(source: string) {
@@ -229,6 +232,17 @@ export function WizardReviewStep({
                       {line.surcharge > 0
                         ? ` · incl. surcharge ${amount(line.surcharge)}`
                         : ""}
+                      {(line.combinedRoutes ?? []).length > 0 && (
+                        <>
+                          {" · "}
+                          {(line.combinedRoutes ?? [])
+                            .map(
+                              (part) =>
+                                `${sourceLabel(part.route)} ${amount(part.income)}`,
+                            )
+                            .join(" + ")}
+                        </>
+                      )}
                     </p>
                   </div>
                   <span className="text-sm font-semibold tabular-nums">
@@ -250,6 +264,15 @@ export function WizardReviewStep({
                 {amount(filingSummary?.finalTaxDue ?? 0)} of this is final tax
                 and is not refundable through the return. Assessable portion:{" "}
                 {amount(filingSummary?.assessableTaxDue ?? 0)}.
+              </p>
+            )}
+            {(filingSummary?.mixedExcessWithholding ?? 0) > 0 && (
+              <p className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                {amount(filingSummary?.mixedExcessWithholding ?? 0)} was
+                withheld above the calculated liability on this mixed return.
+                Confirm via CPRs that the excess sits on adjustable
+                withholding before claiming it as refund — final-tax
+                over-deduction is not refundable.
               </p>
             )}
           </div>
