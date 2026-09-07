@@ -18,7 +18,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-dist/
 coverage/
 
 # Local uploaded documents
