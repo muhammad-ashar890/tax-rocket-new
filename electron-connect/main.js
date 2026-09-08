@@ -43,7 +43,7 @@ let realPortalLoginUrl = "";
 const irisNavigation = require("./iris-navigation");
 // Independent controller stamp: a new navigator must not make an OLD main
 // process appear fully updated (the mixed fix10/fix11 rollout hid this).
-const AGENT_BUILD_TAG = "fix15-interaction-wait-20260908";
+const AGENT_BUILD_TAG = "fix16-new-return-setup-20260908";
 function getAgentBuildLabel() {
   return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG}`;
 }
@@ -1322,22 +1322,25 @@ function applyLaunchUrl(rawValue) {
     );
     return false;
   }
+  const incomingPartitionKey =
+    parsed.searchParams.get("partitionKey") ||
+    parsed.searchParams.get("partition") ||
+    loadAgentState().partitionKey ||
+    "";
+  const incomingAccountReference = String(
+    parsed.searchParams.get("accountReference") || "",
+  ).trim();
   launchState = {
     flow: parsed.searchParams.get("flow") !== "dld" ? "fbr" : "dld",
     token: parsed.searchParams.get("token") || "",
     nonce: parsed.searchParams.get("nonce") || "",
     apiBaseUrl: sanitizeBaseUrl(parsed.searchParams.get("apiBaseUrl") || ""),
     accountReference:
-      (parsed.searchParams.get("partitionKey") ||
-        parsed.searchParams.get("partition") ||
-        loadAgentState().partitionKey) === launchState.partitionKey
+      incomingAccountReference ||
+      (incomingPartitionKey === launchState.partitionKey
         ? launchState.accountReference
-        : "",
-    partitionKey:
-      parsed.searchParams.get("partitionKey") ||
-      parsed.searchParams.get("partition") ||
-      loadAgentState().partitionKey ||
-      "",
+        : ""),
+    partitionKey: incomingPartitionKey,
     deviceAuthToken: "",
     trustedDevicePublicId: loadAgentState().trustedDevicePublicId || "",
     allowedOrigins: [],
@@ -1397,6 +1400,14 @@ function applyLaunchPayload(payload) {
     );
     return false;
   }
+  const incomingPartitionKey =
+    typeof payload?.partitionKey === "string"
+      ? payload.partitionKey.trim()
+      : loadAgentState().partitionKey || "";
+  const incomingAccountReference =
+    typeof payload?.accountReference === "string"
+      ? payload.accountReference.trim()
+      : "";
   launchState = {
     flow: payload?.flow !== "dld" ? "fbr" : "dld",
     token: typeof payload?.token === "string" ? payload.token : "",
@@ -1405,13 +1416,11 @@ function applyLaunchPayload(payload) {
       typeof payload?.apiBaseUrl === "string" ? payload.apiBaseUrl : "",
     ),
     accountReference:
-      typeof payload?.accountReference === "string"
-        ? payload.accountReference.trim()
-        : "",
-    partitionKey:
-      typeof payload?.partitionKey === "string"
-        ? payload.partitionKey.trim()
-        : loadAgentState().partitionKey || "",
+      incomingAccountReference ||
+      (incomingPartitionKey === launchState.partitionKey
+        ? launchState.accountReference
+        : ""),
+    partitionKey: incomingPartitionKey,
     deviceAuthToken: "",
     trustedDevicePublicId: loadAgentState().trustedDevicePublicId || "",
     allowedOrigins: Array.isArray(payload?.allowedOrigins)
@@ -3349,14 +3358,27 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
   const windowInstance = await ensureWorkerWindow();
   const config = jobContext.taxAutomationConfig || {};
   const packet = jobContext.filingPacket || {};
+  const snapshot = packet.snapshot || jobContext.snapshot || {};
   const taxYear = Number(
-    packet.taxYear || packet.snapshot?.filing?.taxYear || job?.payload?.taxYear,
+    packet.taxYear || snapshot.filing?.taxYear || job?.payload?.taxYear,
   );
   if (!Number.isInteger(taxYear) || taxYear < 2000 || taxYear > 2100) {
     throw new Error(
       "The approved packet does not specify a valid tax year. No portal action was taken.",
     );
   }
+  const portalFieldMap = Array.isArray(snapshot.portalFieldMap)
+    ? snapshot.portalFieldMap
+    : [];
+  const residencyStatus = String(
+    portalFieldMap.find((entry) => entry?.key === "return.residency_status")
+      ?.value || "",
+  ).trim();
+  const newReturnContext = {
+    routeFamily: snapshot.routeMetadata?.routeFamily || null,
+    filingIntent: snapshot.routeMetadata?.filingIntent || "original",
+    residencyStatus: residencyStatus || null,
+  };
   const executionLog = [];
   activeJobExecutionLog = executionLog;
   const onStep = (step, detail) => {
@@ -3365,7 +3387,11 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
   };
   onStep(
     "live_pilot_boundary",
-    `Original 114(1), TY${taxYear}: existing draft first, otherwise new-return menu. Financial filling, Save and Submit remain disabled.`,
+    `Original 114(1), TY${taxYear}: existing draft first, otherwise guarded TY2026+ new-return setup. Financial filling, Save and Submit remain disabled.`,
+  );
+  onStep(
+    "new_return_context",
+    `Route=${newReturnContext.routeFamily || "unknown"}; filingIntent=${newReturnContext.filingIntent || "unknown"}; residency=${newReturnContext.residencyStatus || "not provided in packet/context"}.`,
   );
   const taxpayerIdentifier = String(launchState.accountReference || "")
     .trim()
@@ -3390,6 +3416,7 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
     outcome = supportedFamily
       ? await irisNavigation.inspectNavigation(getLivePortalWindow, {
           ...lastNavigationOptions,
+          newReturnContext,
           openReturn: true,
           state: navigationStates.get(stateKey),
           inspectSections: true,

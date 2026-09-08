@@ -7,6 +7,7 @@ import {
   generatePartitionKey,
   hashToken,
   buildDesktopSessionConfig,
+  chooseDesktopAccountReference,
 } from "@/lib/tax/fbr-desktop";
 
 /**
@@ -35,7 +36,7 @@ export async function POST(req: NextRequest) {
 
     const user = await prisma.user.findUnique({
       where: { email },
-      select: { id: true },
+      select: { id: true, cnic: true, ntn: true },
     });
     if (!user) {
       return NextResponse.json(
@@ -57,7 +58,7 @@ export async function POST(req: NextRequest) {
     // Verify draft ownership and that packet exists
     const draft = await prisma.filingDraft.findFirst({
       where: { id: filingDraftId, userId: user.id },
-      select: { id: true, taxYear: true, status: true },
+      select: { id: true, taxYear: true, status: true, filerType: true },
     });
 
     if (!draft) {
@@ -92,10 +93,17 @@ export async function POST(req: NextRequest) {
     const partitionKey = generatePartitionKey(user.id);
     const deviceTokenHash = hashToken(launchToken);
 
+    const accountReference = chooseDesktopAccountReference({
+      filerType: draft.filerType,
+      cnic: user.cnic,
+      ntn: user.ntn,
+    });
+
     const config = buildDesktopSessionConfig({
       launchToken,
       partitionKey,
       deviceTokenHash,
+      accountReference,
     });
 
     // The partition key is STABLE per user (the Electron profile holds the
@@ -108,7 +116,10 @@ export async function POST(req: NextRequest) {
     });
 
     if (existingDevice && existingDevice.userId !== user.id) {
-      return NextResponse.json({ success: false, error: "Device partition ownership mismatch" }, { status: 409 });
+      return NextResponse.json(
+        { success: false, error: "Device partition ownership mismatch" },
+        { status: 409 },
+      );
     }
     const device = await prisma.trustedDevice.upsert({
       where: { partitionKey },
@@ -122,7 +133,10 @@ export async function POST(req: NextRequest) {
       create: {
         userId: user.id,
         deviceName: `Desktop-${new Date().toISOString().slice(0, 10)}`,
-        deviceTokenHash, partitionKey, status: "PENDING", lastSeenAt: new Date(),
+        deviceTokenHash,
+        partitionKey,
+        status: "PENDING",
+        lastSeenAt: new Date(),
       },
     });
 

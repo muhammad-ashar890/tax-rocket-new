@@ -7,6 +7,7 @@ import {
   getCombinedAgentConfig,
   resolveIrisRouteFamily,
 } from "@/lib/tax/fbr-agent-config";
+import { flattenPortalFieldMap } from "@/lib/tax/portal-field-map";
 
 /**
  * GET /api/local-agent/jobs/[jobId]/context
@@ -170,7 +171,13 @@ export async function GET(
     const filing = snapshot.filing || {};
     const ledgerEntries = snapshot.ledgerEntries || [];
     const taxCredits = snapshot.taxCredits || [];
-    const portalMapObj = snapshot.portalFieldMap || {};
+    const rawPortalFieldMap = snapshot.portalFieldMap || {};
+    const portalMapDetailed =
+      snapshot.portalFieldMapDetailed ||
+      (Array.isArray(rawPortalFieldMap) ? null : rawPortalFieldMap);
+    const normalizedRealPortalFieldMap = Array.isArray(rawPortalFieldMap)
+      ? rawPortalFieldMap
+      : flattenPortalFieldMap(rawPortalFieldMap);
 
     const sumByCategory = (cats: string[]) => {
       return ledgerEntries
@@ -267,8 +274,12 @@ export async function GET(
     ];
 
     // The mock fixture map must NEVER replace the real IRIS-code mapping.
-    // Unknown form type is an identification checkpoint, not a default 114 row.
-    const selectedMap = portalConfig.useMockIris ? flatMockMap : portalMapObj;
+    // Real-mode workers receive a flat array, while the grouped/original packet
+    // map is preserved separately for debugging and future route-specific fill
+    // strategies.
+    const selectedMap = portalConfig.useMockIris
+      ? flatMockMap
+      : normalizedRealPortalFieldMap;
     const taxYear = Number(snapshot.filing?.taxYear || job.filingDraft.taxYear);
     const finalSnapshot = {
       ...snapshot,
@@ -279,7 +290,7 @@ export async function GET(
         requiresIdentification: !routeFamily,
       },
       portalFieldMap: selectedMap,
-      portalFieldMapDetailed: portalMapObj,
+      portalFieldMapDetailed: portalMapDetailed,
     };
 
     return NextResponse.json({

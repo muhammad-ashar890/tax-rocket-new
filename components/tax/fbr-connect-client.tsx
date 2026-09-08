@@ -478,11 +478,13 @@ export default function FbrConnectClient({
             <p className="text-muted-foreground">
               Agent is ready
               {readyDevice?.deviceName ? ` on ${readyDevice.deviceName}` : ""}.
-              Enter the target CNIC/NTN in the desktop agent first. The pilot
-              opens a matching original 114(1) draft, or the new-return menu if
-              none exists in the complete list. It inspects the supplied Data
-              sections plus Payment and Attachment structures. It does not enter
-              amounts, upload files, pay, save or submit.
+              The desktop agent uses the taxpayer CNIC/NTN from your TaxRocket
+              profile when available; if that field is blank or wrong, correct
+              it locally before starting. The pilot opens a matching original
+              114(1) draft, or the new-return menu if none exists in the
+              complete list. It inspects the supplied Data sections plus Payment
+              and Attachment structures. It does not enter amounts, upload
+              files, pay, save or submit.
             </p>
             <div className="flex flex-wrap items-center gap-2">
               <Button

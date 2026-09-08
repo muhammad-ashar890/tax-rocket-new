@@ -2,10 +2,12 @@
 
 // Navigation-only live pilot. Only allowlisted dashboard/menu/edit controls
 // and a positively identified promotional dialog Close button may be clicked.
-// An explicitly matched existing draft can now be opened. New-return navigation
-// stops at the documented menu; Create/Save/Submit/payment controls and all
-// financial inputs remain off limits until the engine/mapping audit is resolved.
-const BUILD_TAG = "fix15-interaction-wait-20260908";
+// An explicitly matched existing draft can now be opened. When no matching
+// draft exists, the agent may advance only the exact, packet-derived original
+// TY2026+ return setup steps that do not require legal/financial judgement.
+// Create/Save/Submit/payment controls and all financial inputs remain off
+// limits until the engine/mapping audit is resolved.
+const BUILD_TAG = "fix16-new-return-setup-20260908";
 const DEFAULT_HOSTS = ["iris.fbr.gov.pk"];
 const SECTION_TOUR = Object.freeze([
   { id: "salary", group: "Employment", tab: "Salary" },
@@ -46,6 +48,66 @@ const ALL_SECTION_TOUR = Object.freeze([
 const ALL_SECTION_IDS = Object.freeze(
   ALL_SECTION_TOUR.map((section) => section.id),
 );
+
+function normalizeSetupLabel(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function getExpectedOriginalTaxPeriod(taxYear) {
+  const year = Number(taxYear);
+  if (!Number.isInteger(year) || year < 2001) return null;
+  const startYear = year - 1;
+  return {
+    startIso: `${startYear}-07-01`,
+    endIso: `${year}-06-30`,
+    startLabel: `01-Jul-${startYear}`,
+    endLabel: `30-Jun-${year}`,
+    longStartLabel: `01-July-${startYear}`,
+    longEndLabel: `30-June-${year}`,
+  };
+}
+
+function classifyNewReturnSetupStage(input = {}) {
+  if (input.documentPresent) return null;
+  const prompts = new Set(
+    (input.prompts || []).map((value) => normalizeSetupLabel(value)),
+  );
+  const actions = new Set(
+    (input.actions || []).map((value) => normalizeSetupLabel(value)),
+  );
+  const nodeLabels = new Set(
+    (input.nodeLabels || []).map((value) => normalizeSetupLabel(value)),
+  );
+
+  if (nodeLabels.has("normal return (ind/aop/coy)")) return "menu";
+  if (prompts.has("normal return") && prompts.has("simplified return"))
+    return "return_type";
+  if (prompts.has("resident") || prompts.has("non-resident"))
+    return "residency";
+  if (actions.has("accept and continue")) return "accept_continue";
+  if (
+    (prompts.has("tax year") || prompts.has("period")) &&
+    actions.has("continue")
+  )
+    return "period";
+
+  return null;
+}
+
+function isRecognizedNewReturnSetup(input = {}) {
+  return Boolean(classifyNewReturnSetupStage(input));
+}
+
+function isSafeAutoAdvanceNewReturnStage(stage) {
+  return ["menu", "return_type", "period", "accept_continue"].includes(stage);
+}
+
+function isManualNewReturnStage(stage) {
+  return stage === "residency";
+}
 
 function isAllowedPortalUrl(value, hosts = DEFAULT_HOSTS) {
   try {
@@ -324,6 +386,11 @@ function portalProbe(options = {}) {
       "Personal Assets / Liabilities",
       "Reconciliation of Net Assets",
       "Return Statements (Original for TY 2026 and onwards)",
+      "Normal Return (Ind/AOP/COY)",
+      "Accept and Continue",
+      "Resident",
+      "Non-Resident",
+      "Period",
     ];
     return (
       known.find((p) => t.toLowerCase() === p.toLowerCase()) ||
@@ -1738,6 +1805,9 @@ function portalProbe(options = {}) {
       "open-matching-draft",
       "declaration-hover",
       "new-return-category",
+      "new-return-form",
+      "new-return-continue",
+      "new-return-residency",
       "expand-employment",
       "salary-tab",
       "section-panel",
@@ -1790,6 +1860,28 @@ function portalProbe(options = {}) {
                 text(el) ===
                   "Return Statements (Original for TY 2026 and onwards)",
             )
+          : [];
+      } else if (options.action === "new-return-form") {
+        matches = allControls.filter((el) => {
+          const label = text(el);
+          return (
+            label === "Normal Return (Ind/AOP/COY)" || label === "Normal Return"
+          );
+        });
+      } else if (options.action === "new-return-continue") {
+        const continueControls = allControls.filter((el) => {
+          const label = text(el);
+          return label === "Continue" || label === "Accept and Continue";
+        });
+        const acceptAndContinue = continueControls.filter(
+          (el) => text(el) === "Accept and Continue",
+        );
+        matches =
+          acceptAndContinue.length === 1 ? acceptAndContinue : continueControls;
+      } else if (options.action === "new-return-residency") {
+        const targetResidency = String(options.residencyStatus || "").trim();
+        matches = targetResidency
+          ? allControls.filter((el) => text(el) === targetResidency)
           : [];
       } else if (options.action === "data-tab") {
         if (
@@ -2006,6 +2098,31 @@ function portalProbe(options = {}) {
       // Do not read .value, defaultValue, placeholder, options or textContent.
     }))
     .slice(0, 100);
+  const newReturnPrompts = [
+    "Tax Year",
+    "Period",
+    "Normal Return",
+    "Simplified Return",
+    "Resident",
+    "Non-Resident",
+  ].filter((label) =>
+    Array.from(document.querySelectorAll('label,legend,[role="heading"]'))
+      .filter(visible)
+      .some((el) => text(el).toLowerCase() === label.toLowerCase()),
+  );
+  const newReturnActions = allControls
+    .map(text)
+    .filter((label) =>
+      /^(Next|Continue|Create|Accept and Continue)$/i.test(label),
+    );
+  const newReturnSetup = !documentInfo.present
+    ? {
+        // Presence only. Never read field values. The navigation pilot may
+        // only click exact, allowlisted setup controls for the packet route.
+        prompts: newReturnPrompts,
+        actions: newReturnActions,
+      }
+    : null;
   return {
     schemaVersion: 2,
     url: safeUrl(location.href),
@@ -2013,30 +2130,7 @@ function portalProbe(options = {}) {
     identityConfigured,
     document: documentInfo,
     section,
-    newReturnSetup: !documentInfo.present
-      ? {
-          // Presence only. Never read field values or click setup/consent buttons.
-          prompts: [
-            "Tax Year",
-            "Period",
-            "Normal Return",
-            "Simplified Return",
-            "Resident",
-            "Non-Resident",
-          ].filter((label) =>
-            Array.from(
-              document.querySelectorAll('label,legend,[role="heading"]'),
-            )
-              .filter(visible)
-              .some((el) => text(el).toLowerCase() === label.toLowerCase()),
-          ),
-          actions: allControls
-            .map(text)
-            .filter((label) =>
-              /^(Next|Continue|Create|Accept and Continue)$/i.test(label),
-            ),
-        }
-      : null,
+    newReturnSetup,
     grid: {
       present: Boolean(grid && visible(grid)),
       rowCount: dashboardRows.length,
@@ -2092,6 +2186,9 @@ async function probeFrames(
       "open-matching-draft",
       "declaration-hover",
       "new-return-category",
+      "new-return-form",
+      "new-return-continue",
+      "new-return-residency",
       "expand-employment",
       "salary-tab",
       "section-panel",
@@ -2172,6 +2269,7 @@ async function inspectNavigation(
     onStep = () => {},
     openReturn = false,
     taxpayerIdentifier = "",
+    newReturnContext = {},
     state = {},
     inspectSections = false,
     sectionIds = null,
@@ -2180,6 +2278,23 @@ async function inspectNavigation(
   } = {},
 ) {
   const options = { taxYear, openReturn, taxpayerIdentifier };
+  const normalizedResidencyStatus = /non\s*-?resident/i.test(
+    String(newReturnContext?.residencyStatus || ""),
+  )
+    ? "Non-Resident"
+    : /resident/i.test(String(newReturnContext?.residencyStatus || ""))
+      ? "Resident"
+      : null;
+  const expectedPeriod = getExpectedOriginalTaxPeriod(taxYear);
+  const setupContext = {
+    routeFamily: newReturnContext?.routeFamily || null,
+    filingIntent:
+      String(newReturnContext?.filingIntent || "original")
+        .trim()
+        .toLowerCase() || "original",
+    residencyStatus: normalizedResidencyStatus,
+    expectedPeriod,
+  };
   const tourPlan =
     sectionIds === null
       ? SECTION_TOUR
@@ -2644,6 +2759,7 @@ async function inspectNavigation(
         inspection: snapshot,
         requiredAction: "portal_taxpayer_mismatch",
       };
+    state.newEntryOpened = false;
     onStep(
       "document_verified",
       `Original 114(1) return, TY${taxYear}, and the locally entered taxpayer identifier match.`,
@@ -2700,6 +2816,169 @@ async function inspectNavigation(
         : "portal_fields_unverified",
     };
   };
+  const getActionStatus = (response, action) =>
+    response.frames.find(
+      (frame) =>
+        frame.actionResult?.action === action &&
+        frame.actionResult?.status !== "read_only",
+    )?.actionResult?.status || "not_found";
+  const describeSetupSnapshot = (snapshot) => {
+    const candidates = snapshot.frames
+      .filter(
+        (frame) =>
+          frame.authenticated &&
+          !frame.hasBlockingOverlay &&
+          !frame.document?.present,
+      )
+      .map((frame) => {
+        const nodeLabels = (frame.nodes || [])
+          .map((node) => node.label)
+          .filter(Boolean);
+        const descriptor = {
+          documentPresent: frame.document?.present,
+          prompts: frame.newReturnSetup?.prompts || [],
+          actions: frame.newReturnSetup?.actions || [],
+          nodeLabels,
+        };
+        return {
+          frame,
+          nodeLabels,
+          descriptor,
+          stage: classifyNewReturnSetupStage(descriptor),
+        };
+      })
+      .filter(
+        (entry) =>
+          entry.frame.newReturnSetup ||
+          isRecognizedNewReturnSetup(entry.descriptor),
+      );
+    const recognized = candidates.filter((entry) => entry.stage);
+    return {
+      candidates,
+      recognized,
+      current:
+        recognized.length === 1
+          ? recognized[0]
+          : recognized.length === 0 && candidates.length === 1
+            ? candidates[0]
+            : null,
+      ambiguous: recognized.length > 1 || candidates.length > 1,
+    };
+  };
+  const advanceNewReturnSetup = async (initialSnapshot) => {
+    let snapshot = initialSnapshot;
+    for (let attempt = 1; attempt <= 8; attempt++) {
+      snapshot = snapshot || (await read());
+      if (requiresLogin(snapshot))
+        return { inspection: snapshot, requiredAction: "session_reconnect" };
+      if (snapshot.frames.some((frame) => frame.hasBlockingOverlay))
+        return { inspection: snapshot, requiredAction: "portal_popup" };
+      if (!isAuthenticated(snapshot))
+        return {
+          inspection: snapshot,
+          requiredAction: "portal_readiness_unverified",
+        };
+      if (snapshot.frames.some((frame) => frame.document?.present))
+        return verifyDocument(snapshot);
+      const setup = describeSetupSnapshot(snapshot);
+      if (setup.ambiguous)
+        return { inspection: snapshot, requiredAction: "portal_navigation" };
+      if (!setup.current) {
+        onStep(
+          "new_return_setup_wait",
+          "TY2026+ new-return setup did not stabilize on the authenticated frame.",
+        );
+        return {
+          inspection: snapshot,
+          requiredAction: "portal_new_return_setup",
+        };
+      }
+      const stage = setup.current.stage;
+      const labels = [
+        ...(setup.current.descriptor.prompts || []),
+        ...(setup.current.descriptor.actions || []),
+      ].join(", ");
+      onStep(
+        "new_return_setup_stage",
+        `TY${taxYear} setup stage ${stage || "unclassified"}${labels ? ` (${labels})` : ""}.`,
+      );
+      if (!stage)
+        return {
+          inspection: snapshot,
+          requiredAction: "portal_new_return_setup",
+        };
+      if (stage === "residency") {
+        if (!setupContext.residencyStatus) {
+          onStep(
+            "new_return_setup_pause",
+            "Residency choice is visible, but the approved packet/context does not yet provide Resident vs Non-Resident for safe auto-clicking.",
+          );
+          return {
+            inspection: snapshot,
+            requiredAction: "portal_new_return_setup",
+          };
+        }
+        const result = await act("new-return-residency", {
+          residencyStatus: setupContext.residencyStatus,
+        });
+        const status = getActionStatus(result, "new-return-residency");
+        onStep(
+          "new_return_setup_action",
+          `residency (${setupContext.residencyStatus}): ${status}.`,
+        );
+        if (!["clicked", "already_active"].includes(status))
+          return {
+            inspection: result,
+            requiredAction: "portal_new_return_setup",
+          };
+        state.newEntryOpened = true;
+        await delay(900);
+        snapshot = null;
+        continue;
+      }
+      if (!isSafeAutoAdvanceNewReturnStage(stage))
+        return {
+          inspection: snapshot,
+          requiredAction: "portal_new_return_setup",
+        };
+      if (stage === "return_type" && setupContext.filingIntent !== "original") {
+        onStep(
+          "new_return_setup_pause",
+          `Unsupported filing intent for the TY2026+ wizard: ${setupContext.filingIntent || "unknown"}.`,
+        );
+        return {
+          inspection: snapshot,
+          requiredAction: "portal_new_return_setup",
+        };
+      }
+      if (stage === "period" && setupContext.expectedPeriod) {
+        onStep(
+          "new_return_setup_context",
+          `Proceeding only for the original full-year period ${setupContext.expectedPeriod.startLabel} to ${setupContext.expectedPeriod.endLabel}.`,
+        );
+      }
+      const action =
+        stage === "menu" || stage === "return_type"
+          ? "new-return-form"
+          : "new-return-continue";
+      const result = await act(action);
+      const status = getActionStatus(result, action);
+      onStep("new_return_setup_action", `${stage}: ${action} ${status}.`);
+      if (!["clicked", "already_active"].includes(status))
+        return {
+          inspection: result,
+          requiredAction: "portal_new_return_setup",
+        };
+      state.newEntryOpened = true;
+      await delay(stage === "accept_continue" ? 1200 : 900);
+      snapshot = null;
+    }
+    const finalSnapshot = await read();
+    return {
+      inspection: finalSnapshot,
+      requiredAction: "portal_new_return_setup",
+    };
+  };
   let inspection = await read();
   onStep("readiness_check", "Checking the official IRIS screen.");
   if (requiresLogin(inspection)) {
@@ -2749,7 +3028,7 @@ async function inspectNavigation(
   if (openReturn && inspection.frames.some((f) => f.document?.present))
     return verifyDocument(inspection);
   if (openReturn && state.newEntryOpened)
-    return { inspection, requiredAction: "portal_new_return_setup" };
+    return advanceNewReturnSetup(inspection);
 
   for (const action of ["draft-tab", "it-declaration-tab"]) {
     // Angular may render the next control after the click has returned.
@@ -2839,7 +3118,7 @@ async function inspectNavigation(
 
   onStep(
     "no_matching_draft",
-    "No matching draft found in the complete displayed IT Declaration list. Opening the new-return menu, not creating/submitting a document.",
+    "No matching draft found in the complete displayed IT Declaration list. Starting the guarded TY2026+ original return setup flow.",
   );
   await act("declaration-hover");
   await delay(300);
@@ -2856,13 +3135,10 @@ async function inspectNavigation(
       state.newEntryOpened = true;
       onStep(
         "new_return_menu",
-        "Declaration → Return Statements (Original for TY 2026 and onwards) opened. Complete unverified new-return setup locally, then Retry.",
+        "Declaration → Return Statements (Original for TY 2026 and onwards) opened. Continuing the guarded TY2026+ original setup flow.",
       );
       await delay(800);
-      return {
-        inspection: await read(),
-        requiredAction: "portal_new_return_setup",
-      };
+      return advanceNewReturnSetup(await read());
     }
     if (
       opened.frames.some((f) =>
@@ -2882,6 +3158,12 @@ module.exports = {
   SECTION_TOUR,
   ALL_SECTION_TOUR,
   ALL_SECTION_IDS,
+  normalizeSetupLabel,
+  getExpectedOriginalTaxPeriod,
+  classifyNewReturnSetupStage,
+  isRecognizedNewReturnSetup,
+  isSafeAutoAdvanceNewReturnStage,
+  isManualNewReturnStage,
   isAllowedPortalUrl,
   portalProbe,
   probeFrames,

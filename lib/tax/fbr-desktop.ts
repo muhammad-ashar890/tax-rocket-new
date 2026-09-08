@@ -35,10 +35,25 @@ export type DesktopSessionConfig = {
   readyUrlPattern: string;
 };
 
+export function normalizeAccountReference(value: string | null | undefined) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function chooseDesktopAccountReference(params: {
+  filerType?: string | null;
+  cnic?: string | null;
+  ntn?: string | null;
+}) {
+  const cnic = normalizeAccountReference(params.cnic);
+  const ntn = normalizeAccountReference(params.ntn);
+  return params.filerType === "my_business" ? ntn || cnic : cnic || ntn;
+}
+
 export function buildDesktopSessionConfig(params: {
   launchToken: string;
   partitionKey: string;
   deviceTokenHash: string;
+  accountReference?: string | null;
 }): DesktopSessionConfig {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min
   const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
@@ -57,6 +72,7 @@ export function buildDesktopSessionConfig(params: {
     readyUrlPattern,
     rejectSelector: auth.readyRejectSelector || "",
     useMockIris: String(auth.useMockIris),
+    accountReference: normalizeAccountReference(params.accountReference),
   });
 
   return {

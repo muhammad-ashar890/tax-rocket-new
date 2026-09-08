@@ -13,7 +13,10 @@ import { validateAuthoritativeReconciliation } from "@/lib/tax/reconciliation-ca
 import { createNotification } from "@/app/actions/notifications";
 import { serializePacketMoney } from "@/lib/money";
 import { toMoneyAmount, toMoneyNumber, type MoneyInput } from "@/lib/money";
-import { buildPortalFieldMap } from "@/lib/tax/portal-field-map";
+import {
+  buildPacketRouteMetadata,
+  buildPortalFieldMap,
+} from "@/lib/tax/portal-field-map";
 
 async function getOwnedDraft(draftId: string) {
   const session = await getServerSession(authOptions);
@@ -322,6 +325,11 @@ export async function generateFilingPacketAction(draftId: string) {
       };
     }
 
+    const parsedIncomeSources = JSON.parse(draftData.incomeSources) as string[];
+    const parsedReadinessChecks = JSON.parse(
+      draftData.readinessChecks,
+    ) as string[];
+
     // Build portalFieldMap using IRIS codes for Electron agent
     const portalFieldMap = buildPortalFieldMap({
       taxYear: draftData.taxYear,
@@ -341,8 +349,16 @@ export async function generateFilingPacketAction(draftId: string) {
         amount: c.amount as any,
         source: c.source,
       })),
-      taxableIncome: draftData.taxableIncome ? Number(draftData.taxableIncome) : 0,
+      taxableIncome: draftData.taxableIncome
+        ? Number(draftData.taxableIncome)
+        : 0,
       taxWithheld: draftData.taxWithheld ? Number(draftData.taxWithheld) : 0,
+    });
+    const routeMetadata = buildPacketRouteMetadata({
+      taxYear: draftData.taxYear,
+      filerType: draftData.filerType,
+      businessStructure: draftData.businessStructure,
+      incomeSources: parsedIncomeSources,
     });
 
     const snapshot = {
@@ -353,12 +369,13 @@ export async function generateFilingPacketAction(draftId: string) {
           latestPacket?.approvalStatus === "APPROVED"
             ? "IN_PROGRESS"
             : draftData.status,
-        incomeSources: JSON.parse(draftData.incomeSources),
-        readinessChecks: JSON.parse(draftData.readinessChecks),
+        incomeSources: parsedIncomeSources,
+        readinessChecks: parsedReadinessChecks,
       },
       documents,
       ledgerEntries,
       taxCredits,
+      routeMetadata,
       portalFieldMap,
     };
 
