@@ -5,6 +5,11 @@ const accountReferenceInput = document.getElementById("accountReference");
 const openLoginButton = document.getElementById("openLoginButton");
 
 const agent = window.taxRocketAgent;
+const exportInspectionButton = document.getElementById(
+  "exportInspectionButton",
+);
+const agentBuild = document.getElementById("agentBuild");
+const statusHistory = document.getElementById("statusHistory");
 
 let launchState = {
   flow: "fbr",
@@ -20,9 +25,17 @@ function isFbrFlow() {
 function setStatus(kind, message) {
   statusCard.className = `status status-${kind}`;
   statusCard.textContent = message;
+  if (statusHistory.lastElementChild?.textContent !== message) {
+    const entry = document.createElement("li");
+    entry.textContent = message;
+    statusHistory.appendChild(entry);
+    while (statusHistory.children.length > 12)
+      statusHistory.firstElementChild.remove();
+  }
 }
 
 function renderLaunchState(nextState) {
+  agentBuild.textContent = `Build: ${nextState?.agentBuild || "unknown — restart the updated agent"}`;
   launchState = {
     flow: nextState?.flow === "dld" ? "dld" : "fbr",
     token: nextState?.token || "",
@@ -68,8 +81,13 @@ async function bootstrap() {
 accountReferenceInput.addEventListener("input", async () => {
   try {
     await agent.setAccountReference(accountReferenceInput.value);
-  } catch {
-    // Ignore local sync errors; auto-capture can proceed without this optional value.
+  } catch (error) {
+    setStatus(
+      "error",
+      error instanceof Error
+        ? error.message
+        : "Could not update the local taxpayer target.",
+    );
   }
 });
 
@@ -89,6 +107,24 @@ openLoginButton.addEventListener("click", async () => {
         ? error.message
         : "The login window could not be opened.",
     );
+  }
+});
+
+exportInspectionButton.addEventListener("click", async () => {
+  exportInspectionButton.disabled = true;
+  try {
+    const result = await agent.exportIrisInspection();
+    setStatus(
+      "success",
+      `Export saved: ${result.filePath}. Review it before sharing.`,
+    );
+  } catch (error) {
+    setStatus(
+      "error",
+      error instanceof Error ? error.message : "Export failed.",
+    );
+  } finally {
+    exportInspectionButton.disabled = false;
   }
 });
 

@@ -5,6 +5,7 @@ import {
   getFbrPortalAutomationConfig,
   DEFAULT_SELECTOR_BUNDLE,
   getCombinedAgentConfig,
+  resolveIrisRouteFamily,
 } from "@/lib/tax/fbr-agent-config";
 
 /**
@@ -80,19 +81,43 @@ export async function GET(
       );
     }
 
-    // Get latest packet for this draft
+    let payload: any = {};
+    try {
+      payload = JSON.parse(job.payloadJson || "{}");
+    } catch {}
+    if (
+      !payload.packetId ||
+      !Number.isInteger(payload.packetVersion) ||
+      !payload.packetHash
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Job has no pinned approved packet. Create a new job.",
+        },
+        { status: 409 },
+      );
+    }
+    // Never switch to a newer/unapproved packet after the user queued a job.
     const packet = await prisma.filingPacket.findFirst({
       where: {
+        id: payload.packetId,
+        version: payload.packetVersion,
+        packetHash: payload.packetHash,
         filingDraftId: job.filingDraftId,
         userId: device.userId,
+        approvalStatus: "APPROVED",
         status: { not: "SUPERSEDED" },
       },
-      orderBy: { version: "desc" },
     });
 
     if (!packet) {
       return NextResponse.json(
-        { success: false, error: "No packet found for this draft" },
+        {
+          success: false,
+          error:
+            "The queued approved packet is unavailable or superseded. Create a new job from an approved packet.",
+        },
         { status: 404 },
       );
     }
@@ -106,13 +131,6 @@ export async function GET(
         { success: false, error: "Invalid packet snapshot" },
         { status: 500 },
       );
-    }
-
-    let payload: any = {};
-    try {
-      payload = JSON.parse(job.payloadJson || "{}");
-    } catch {
-      payload = {};
     }
 
     // Mark job as accepted/running
@@ -142,7 +160,10 @@ export async function GET(
     });
 
     // Get selector bundle for agent (merged old + new)
-    const portalConfig = await getFbrPortalAutomationConfig();
+    const routeFamily = resolveIrisRouteFamily(
+      snapshot.routeMetadata?.routeFamily || snapshot.routeFamily,
+    );
+    const portalConfig = await getFbrPortalAutomationConfig({ routeFamily });
     const combinedConfig = getCombinedAgentConfig();
 
     // Build flat array for mock-iris return.html (data-tax-field-key) + keep original object for real IRIS
@@ -245,14 +266,20 @@ export async function GET(
       },
     ];
 
-    // Merge original detailed map (object) into snapshot, but also provide flat array as top-level for old Electron
+    // The mock fixture map must NEVER replace the real IRIS-code mapping.
+    // Unknown form type is an identification checkpoint, not a default 114 row.
+    const selectedMap = portalConfig.useMockIris ? flatMockMap : portalMapObj;
+    const taxYear = Number(snapshot.filing?.taxYear || job.filingDraft.taxYear);
     const finalSnapshot = {
-      filing: snapshot.filing,
-      documents: snapshot.documents,
-      ledgerEntries: snapshot.ledgerEntries,
-      taxCredits: snapshot.taxCredits || [],
-      portalFieldMap: flatMockMap, // Electron checks Array.isArray(snapshot.portalFieldMap)
-      portalFieldMapDetailed: portalMapObj, // keep detailed version
+      ...snapshot,
+      taxYear,
+      routeMetadata: {
+        ...(snapshot.routeMetadata || {}),
+        routeFamily,
+        requiresIdentification: !routeFamily,
+      },
+      portalFieldMap: selectedMap,
+      portalFieldMapDetailed: portalMapObj,
     };
 
     return NextResponse.json({
@@ -277,7 +304,7 @@ export async function GET(
         id: packet.id,
         version: packet.version,
         packetHash: packet.packetHash,
-        taxYear: snapshot.filing?.taxYear,
+        taxYear,
         filerType: snapshot.filing?.filerType,
         taxpayerListStatus: snapshot.filing?.taxpayerListStatus,
         snapshot: finalSnapshot, // for old Electron that expects packet.snapshot
@@ -285,6 +312,8 @@ export async function GET(
       filingPacket: {
         id: packet.id,
         version: packet.version,
+        packetVersion: packet.version,
+        taxYear,
         packetHash: packet.packetHash,
         snapshot: finalSnapshot,
       },
@@ -293,7 +322,7 @@ export async function GET(
       // This is the critical data for Electron agent
       snapshot: finalSnapshot,
       // Also provide flat map at top level for some old workers
-      portalFieldMap: flatMockMap,
+      portalFieldMap: selectedMap,
       // Selector bundle for IRIS automation (can be updated without deploy)
       selectors: {
         version: portalConfig.selectorBundle.bundleVersion,

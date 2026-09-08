@@ -32,6 +32,133 @@ let localBridgeServer = null;
 let autoCaptureTimer = null;
 let localWorkerTimer = null;
 let localWorkerRunning = false;
+let workerIdleAnnounced = false;
+// Points at the execution log of whichever flow (assisted/dry-run) is
+// currently running, so the failure handler in processLocalJob can persist
+// the FULL step history instead of a single generic line.
+let activeJobExecutionLog = null;
+let realEntryFallbackAnnounced = false;
+let realPortalMode = false;
+let realPortalLoginUrl = "";
+const irisNavigation = require("./iris-navigation");
+// Independent controller stamp: a new navigator must not make an OLD main
+// process appear fully updated (the mixed fix10/fix11 rollout hid this).
+const AGENT_BUILD_TAG = "fix15-interaction-wait-20260908";
+function getAgentBuildLabel() {
+  return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG}`;
+}
+function assertNavigatorBuild() {
+  if (irisNavigation.BUILD_TAG !== AGENT_BUILD_TAG) {
+    throw new Error(
+      "Desktop files are mixed versions. Replace main.js and iris-navigation.js from the same fix15 patch and fully restart the agent.",
+    );
+  }
+}
+let loginWindowPromise = null;
+const navigationStates = new Map();
+let lastNavigationOptions = {}; // local-only target; never serialized in job logs
+let lastSectionTour = null;
+let lastTourStateKey = null;
+
+async function ensureNavigationJobActive(jobId, expectedIdentifier) {
+  const deviceAuthToken =
+    launchState.deviceAuthToken || loadAgentState().deviceAuthToken;
+  const apiBaseUrl = getApiBaseUrl();
+  if (!deviceAuthToken || !apiBaseUrl)
+    throw new Error(
+      "Desktop connection is not available for the navigation job check.",
+    );
+  const response = await fetch(
+    `${apiBaseUrl}/api/local-agent/jobs/${encodeURIComponent(jobId)}/status`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${deviceAuthToken}` },
+      signal: AbortSignal.timeout(5000),
+    },
+  );
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.ok || !payload?.job) {
+    const error = new Error(
+      "Cannot verify the current job with the web app. Ensure the fix13 job status API file is installed and the web server is running.",
+    );
+    error.code = "NAVIGATION_GUARD_UNAVAILABLE";
+    throw error;
+  }
+  if (
+    !["running", "accepted_by_device"].includes(payload.job.status) ||
+    payload.job.expired
+  ) {
+    if (
+      payload.job.expired &&
+      ["running", "accepted_by_device"].includes(payload.job.status)
+    ) {
+      await updateLocalJobStatus(jobId, "expired", {
+        errorMessage: "The navigation job expired.",
+      });
+    }
+    const error = new Error(
+      `Navigation stopped: the web job is ${payload.job.expired ? "expired" : payload.job.status}. No further portal actions were attempted.`,
+    );
+    error.code = "NAVIGATION_JOB_STOPPED";
+    throw error;
+  }
+  const current = String(launchState.accountReference || "")
+    .trim()
+    .replace(/[ -]/g, "");
+  if (current !== expectedIdentifier) {
+    const error = new Error(
+      "The local taxpayer target changed during navigation. Retry with the intended target.",
+    );
+    error.code = "NAVIGATION_TARGET_CHANGED";
+    throw error;
+  }
+}
+
+function getLivePortalWindow() {
+  if (workerWindow && !workerWindow.isDestroyed()) return workerWindow;
+  if (loginWindow && !loginWindow.isDestroyed()) return loginWindow;
+  return null;
+}
+
+function configurePortalChildWindows(windowInstance) {
+  if (
+    launchState.flow !== "fbr" ||
+    !windowInstance.webContents.setWindowOpenHandler
+  )
+    return;
+  windowInstance.webContents.setWindowOpenHandler(({ url }) => {
+    if (!irisNavigation.isAllowedPortalUrl(url)) {
+      pushStatus(
+        "progress",
+        "A portal popup with an unapproved URL was not opened automatically. Inspect the current IRIS screen.",
+      );
+      return { action: "deny" };
+    }
+    return {
+      action: "allow",
+      overrideBrowserWindowOptions: {
+        autoHideMenuBar: true,
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          partition: windowInstance.taxRocketPartition,
+        },
+      },
+    };
+  });
+  windowInstance.webContents.on("did-create-window", (child) => {
+    child.taxRocketPartition = windowInstance.taxRocketPartition;
+    loginWindow = child;
+    workerWindow = child;
+    attachLoginWindowWatchers(child);
+    child.show();
+    pushStatus(
+      "progress",
+      "Following the IRIS document in its new portal window; the same local session is retained.",
+    );
+  });
+}
 let trustedDeviceState = null;
 let autoCaptureState = {
   inProgress: false,
@@ -93,6 +220,7 @@ function notifyRenderer(channel, payload) {
 }
 
 function pushStatus(kind, message) {
+  console.log(`[agent:${kind}] ${message}`);
   notifyRenderer("status-update", { kind, message });
 }
 
@@ -108,7 +236,10 @@ function publishLaunchState() {
     return;
   }
 
-  mainWindow.webContents.send("launch-state", launchState);
+  mainWindow.webContents.send("launch-state", {
+    ...launchState,
+    agentBuild: getAgentBuildLabel(),
+  });
   mainWindow.show();
   mainWindow.focus();
 }
@@ -134,7 +265,9 @@ function normalizeDesktopAuthConfig(input = {}) {
         : typeof input.successUrlPattern === "string"
           ? input.successUrlPattern.trim()
           : "",
-    useMockIris: Boolean(input.useMockIris),
+    useMockIris:
+      input.useMockIris === true ||
+      String(input.loginUrl || "").startsWith("mock-iris://"),
   };
 }
 
@@ -145,7 +278,10 @@ function getMockIrisFile(fileName) {
 function resolveDesktopLoginUrl() {
   if (launchState.flow === "fbr") {
     const configured =
-      launchState.desktopAuthConfig.loginUrl || "mock-iris://login";
+      launchState.desktopAuthConfig.loginUrl ||
+      (launchState.desktopAuthConfig.useMockIris
+        ? "mock-iris://login"
+        : "https://iris.fbr.gov.pk/");
     if (configured === "mock-iris://login") {
       return getMockIrisFile("login.html");
     }
@@ -156,17 +292,48 @@ function resolveDesktopLoginUrl() {
 }
 
 function resolveWorkerEntryUrl(config) {
+  // Real-IRIS sessions must never open local mock fixtures — same guard as
+  // resolveMockIrisUrl, but ALSO keyed on the job config (config.useMockIris
+  // === false) because the localhost-bridge launch carries no loginUrl.
+  // Before the readiness fix this branch was unreachable on the live portal
+  // (the selector wait threw first), so the hardcoded mock return page here
+  // only surfaced after automation started surviving readiness.
+  const configuredLoginUrl =
+    realPortalLoginUrl ||
+    (config && config.readiness && config.readiness.loginUrl) ||
+    launchState.desktopAuthConfig?.loginUrl ||
+    "";
+  const realHandoff =
+    realPortalMode ||
+    config?.useMockIris === false ||
+    (launchState.flow === "fbr" &&
+      /^https?:\/\//i.test(launchState.desktopAuthConfig?.loginUrl || ""));
+
   const entryUrl = config?.dryRun?.entryUrl || "";
 
-  if (entryUrl === "mock-iris://return") {
+  if (
+    realHandoff &&
+    (entryUrl === "mock-iris://return" ||
+      !entryUrl ||
+      String(entryUrl).startsWith("mock-iris://"))
+  ) {
+    if (!realEntryFallbackAnnounced) {
+      realEntryFallbackAnnounced = true;
+      pushStatus(
+        "progress",
+        "Real IRIS session detected: local mock pages are disabled. The agent will continue on the live portal (iris.fbr.gov.pk).",
+      );
+    }
+    return /^https?:\/\//i.test(configuredLoginUrl)
+      ? configuredLoginUrl
+      : "https://iris.fbr.gov.pk/";
+  }
+
+  if (entryUrl === "mock-iris://return" || !entryUrl) {
     return getMockIrisFile("return.html");
   }
 
-  if (entryUrl) {
-    return entryUrl;
-  }
-
-  return getMockIrisFile("return.html");
+  return entryUrl;
 }
 
 /**
@@ -192,12 +359,13 @@ async function navigateIrisTopMenu(
   const selectors = buildActionSelectorChain(routeSelector, "topMenuSelector");
 
   try {
-    await trySelectorsInPriority(
+    const match = await trySelectorsInPriority(
       windowInstance,
       "topMenuSelector",
       selectors,
       driftContext,
     );
+    await clickSelector(windowInstance, match.selector);
   } catch (error) {
     // Fall back to legacy single-selector approach
     try {
@@ -238,12 +406,13 @@ async function navigateIrisLeftCategory(
   );
 
   try {
-    await trySelectorsInPriority(
+    const match = await trySelectorsInPriority(
       windowInstance,
       "leftCategorySelector",
       selectors,
       driftContext,
     );
+    await clickSelector(windowInstance, match.selector);
   } catch (error) {
     try {
       await clickSelector(windowInstance, routeSelector.leftCategorySelector);
@@ -454,6 +623,213 @@ async function handleIrisFormName(windowInstance, routeSelector, taxpayerName) {
  *
  * Returns an execution log entry describing what was done.
  */
+/**
+ * IRIS 2.0 live-portal navigation (dashboard-first strategy).
+ *
+ * The mock-era menu selectors do not exist on the real IRIS 2.0 Angular
+ * portal. What DOES exist (verified from a live dashboard capture):
+ *  - a draft row like "114(1) (Return of Income filed voluntarily for
+ *    complete year)" with a period and an edit action, or
+ *  - the "Income Tax Return for tax year 2026" card.
+ * Click the most specific matching text, wait for Angular to render, and
+ * confirm the form actually opened by counting visible inputs.
+ */
+async function navigateIris2DashboardFlow(windowInstance, formLabel) {
+  const label = String(formLabel || "").toLowerCase();
+  const wantsWealth = label.includes("wealth");
+
+  // The welcome popup re-renders after dismissal (Angular), and its own
+  // text ("Submit Your Income Tax Return...") matches our click targets.
+  // Dismiss it right before picking, and exclude overlay content below.
+  await dismissIrisWelcomePopup(windowInstance);
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  // --- Evidence-based (2026-09-07 dashboard dump, logged-in user): ----
+  // Dashboard is Angular Material at /dashboard. The draft 114(1) row is
+  // <tr class="doubleclick ng-tns-... ng-star-inserted"> inside the
+  // "Draft (Unsubmitted Documents)" tab — the row itself carries a
+  // DOUBLE-CLICK handler (class "doubleclick"), so we dispatch click +
+  // dblclick on the row. Fallback: the old smallest-text card chain.
+  const clickMatch = await windowInstance.webContents
+    .executeJavaScript(
+      `(() => {
+      const clip = (t) => String(t || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const inOverlay = (el) => !!el.closest(
+        '.ui-dialog, [role="dialog"], .modal, [class*="overlay" i], [class*="popup" i], [class*="modal" i]');
+      const wantsWealth = ${wantsWealth ? "true" : "false"};
+      const taskMatch = (t) => wantsWealth
+        ? (t.includes('wealth') || t.includes('116('))
+        : ((t.includes('114(1)') || t.includes('return of income filed'))
+           && !t.includes('user guide') && !t.includes('video guide'));
+
+      // 0) Make sure the Draft (Unsubmitted Documents) tab is selected (best effort).
+      try {
+        const tab = Array.from(document.querySelectorAll('a, button'))
+          .filter((el) => visible(el) && !inOverlay(el))
+          .find((el) => clip(el.innerText).includes('draft (unsubmitted'));
+        if (tab && !String(tab.className).toLowerCase().includes('active')) tab.click();
+      } catch (e) {}
+
+      // 1) Precise draft row: tr.doubleclick with matching task text.
+      const rows = Array.from(document.querySelectorAll('tr'))
+        .filter((el) => visible(el) && !inOverlay(el))
+        .filter((el) => String(el.className).toLowerCase().includes('doubleclick'))
+        .filter((el) => taskMatch(clip(el.innerText || '')));
+
+      if (rows.length > 0) {
+        const row = rows[0];
+        try {
+          try { row.scrollIntoView({ block: 'center' }); } catch (e) {}
+          const opts = { bubbles: true, cancelable: true, view: window };
+          row.dispatchEvent(new MouseEvent('mousedown', opts));
+          row.dispatchEvent(new MouseEvent('mouseup', opts));
+          row.click();
+          row.dispatchEvent(new MouseEvent('dblclick', opts));
+          return { clicked: 'row_dblclick', rowText: clip(row.innerText).slice(0, 70) };
+        } catch (e) {
+          return { clicked: null, error: 'row_dblclick_failed: ' + String(e && e.message || e) };
+        }
+      }
+
+      // 2) Fallback: smallest-text chain (cards / any row).
+      const candidates = Array.from(document.querySelectorAll(
+        'a, button, span, div, td, tr, li, [role="button"], [role="row"], [role="menuitem"]'
+      )).filter((el) => visible(el) && !inOverlay(el));
+
+      const pick = (pred) => {
+        const hits = candidates.filter((el) => pred(clip(el.innerText || '')));
+        hits.sort((a, b) =>
+          String(a.innerText || '').length - String(b.innerText || '').length);
+        return hits[0] || null;
+      };
+
+      let target = null;
+      let how = '';
+      if (wantsWealth) {
+        target = pick((t) => t.includes('wealth statement'));
+        how = 'wealth_card';
+      }
+      if (!target) {
+        target = pick(taskMatch);
+        how = 'draft_row_text';
+      }
+      if (!target) {
+        target = pick((t) => t.includes('income tax return'));
+        how = 'itr_card';
+      }
+      if (!target) return { clicked: null };
+      try {
+        target.scrollIntoView({ block: 'center' });
+        target.click();
+        return { clicked: how };
+      } catch {
+        return { clicked: null };
+      }
+    })()`,
+    )
+    .catch(() => ({ clicked: null }));
+
+  if (!clickMatch?.clicked) {
+    return {
+      steps: [],
+      formReady: false,
+      detail:
+        "IRIS 2.0 dashboard strategy: no draft row or Income-Tax-Return card matched" +
+        (clickMatch?.error ? " (" + clickMatch.error + ")" : "") +
+        ".",
+    };
+  }
+
+  const how = clickMatch.clicked;
+  const rowText = clickMatch.rowText ? ' row="' + clickMatch.rowText + '"' : "";
+
+  // Poll for the form to render (up to ~18s). Angular needs time, and the
+  // dashboard itself has 0 visible inputs, so ANY visible input counts.
+  const countInputs = () =>
+    windowInstance.webContents
+      .executeJavaScript(
+        `(() => {
+          const inputs = Array.from(document.querySelectorAll(
+            'input, textarea, select'
+          )).filter((el) => {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width > 0 && r.height > 0 &&
+              s.display !== 'none' && s.visibility !== 'hidden';
+          });
+          return inputs.length;
+        })()`,
+      )
+      .catch(() => 0);
+
+  let formOpen = 0;
+  let editFallbackTried = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+    formOpen = await countInputs();
+    if (formOpen > 0) break;
+
+    // Row dblclick didn't open the form → try the row's Action-column
+    // edit/pencil control (icon-only buttons: mat-icon ligature text,
+    // font-awesome classes). Explicitly avoid delete/trash.
+    if (!editFallbackTried && how === "row_dblclick") {
+      editFallbackTried = true;
+      const editClicked = await windowInstance.webContents
+        .executeJavaScript(
+          `(() => {
+            const clip = (t) => String(t || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const visible = (el) => {
+              const r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            };
+            const inOverlay = (el) => !!el.closest(
+              '.ui-dialog, [role="dialog"], .modal, [class*="overlay" i], [class*="popup" i], [class*="modal" i]');
+            const wantsWealth = ${wantsWealth ? "true" : "false"};
+            const taskMatch = (t) => wantsWealth
+              ? (t.includes('wealth') || t.includes('116('))
+              : (t.includes('114(1)') || t.includes('return of income filed'));
+            const row = Array.from(document.querySelectorAll('tr'))
+              .filter((el) => visible(el) && !inOverlay(el))
+              .filter((el) => String(el.className).toLowerCase().includes('doubleclick'))
+              .find((el) => taskMatch(clip(el.innerText || '')));
+            if (!row) return null;
+            const ctl = Array.from(
+              row.querySelectorAll('button, a, i, mat-icon, span, img')
+            ).filter(visible).find((el) => {
+              const sig = clip(el.innerText) + ' ' + String(el.className).toLowerCase();
+              return (sig.includes('edit') || sig.includes('pencil') ||
+                      sig.includes('create') || sig.includes('draft') ||
+                      sig.includes('open')) &&
+                     !sig.includes('delete') && !sig.includes('trash') &&
+                     !sig.includes('remove');
+            });
+            if (!ctl) return null;
+            try { ctl.click(); return clip(ctl.innerText || ctl.className).slice(0, 40) || 'ctl'; }
+            catch (e) { return null; }
+          })()`,
+        )
+        .catch(() => null);
+      if (editClicked) {
+        console.log(
+          `[agent] iris2: dblclick did not open the form; clicked row action control "${editClicked}"`,
+        );
+      }
+    }
+  }
+
+  return {
+    steps: [`iris2_${how}${editFallbackTried ? "+edit_ctl" : ""}`],
+    formReady: formOpen > 0,
+    detail:
+      `IRIS 2.0 dashboard strategy: "${how}"${rowText}` +
+      `${editFallbackTried ? " + row action control" : ""}, visible form fields: ${formOpen}.`,
+  };
+}
+
 async function navigateToIrisForm(
   windowInstance,
   routeSelector,
@@ -462,6 +838,21 @@ async function navigateToIrisForm(
   taxpayerName,
 ) {
   const steps = [];
+
+  // IRIS 2.0 live portal: try the dashboard-first strategy BEFORE the
+  // mock-era menu selectors, which do not exist on the real portal.
+  if (realPortalMode) {
+    const iris2 = await navigateIris2DashboardFlow(windowInstance, formLabel);
+    if (iris2.formReady) {
+      return {
+        steps: iris2.steps,
+        formReady: true,
+        detail: iris2.detail,
+      };
+    }
+    // Fall through to the legacy chain — it will fail and the job failure
+    // now carries DOM evidence to build the real selector bundle.
+  }
 
   // Step 1: Navigate top menu
   if (routeSelector?.topMenuSelector) {
@@ -758,14 +1149,18 @@ async function verifyCompletionEvidence(windowInstance, routeSelector) {
 }
 
 function resolveMockIrisUrl(value) {
-  // Real-IRIS sessions must never open local mock fixtures. When the launch
+  // Real-IRIS sessions must never open local mock fixtures. The guard reads
+  // the JOB config (realPortalMode) first — set in processLocalJob — because
+  // the localhost-bridge launch path carries no loginUrl. When the launch
   // handoff configured a real portal login URL, any mock-iris:// stage URL
   // (e.g. from a stale job context) resolves to the real IRIS root instead.
-  const configuredLoginUrl = launchState.desktopAuthConfig?.loginUrl || "";
+  const configuredLoginUrl =
+    realPortalLoginUrl || launchState.desktopAuthConfig?.loginUrl || "";
   if (
-    launchState.flow === "fbr" &&
-    /^https?:\/\//i.test(configuredLoginUrl) &&
-    String(value).startsWith("mock-iris://")
+    String(value).startsWith("mock-iris://") &&
+    (realPortalMode ||
+      (launchState.flow === "fbr" &&
+        /^https?:\/\//i.test(launchState.desktopAuthConfig?.loginUrl || "")))
   ) {
     return configuredLoginUrl;
   }
@@ -856,6 +1251,11 @@ function isLikelyReadyFbrUrl(rawValue) {
     return false;
   }
 
+  if (!launchState.desktopAuthConfig.useMockIris) {
+    // Scheduling may run on any official SPA route. Positive DOM evidence is
+    // still required by captureLoginWindowState; domain alone is NOT ready.
+    return irisNavigation.isAllowedPortalUrl(rawValue);
+  }
   const readyUrlPattern = launchState.desktopAuthConfig.readyUrlPattern;
 
   if (readyUrlPattern && matchesSuccessUrlPattern(rawValue, readyUrlPattern)) {
@@ -880,26 +1280,65 @@ function clearAutoCaptureTimer() {
   }
 }
 
+function sameLaunchAlreadyOpening(token, apiBaseUrl, partitionKey) {
+  return Boolean(
+    token &&
+    token === launchState.token &&
+    sanitizeBaseUrl(apiBaseUrl) === launchState.apiBaseUrl &&
+    (!partitionKey || partitionKey === launchState.partitionKey) &&
+    (loginWindowPromise || (loginWindow && !loginWindow.isDestroyed())),
+  );
+}
+
+function focusPortalWindow() {
+  const windowInstance = loginWindow || workerWindow;
+  if (windowInstance && !windowInstance.isDestroyed()) {
+    windowInstance.show();
+    windowInstance.focus();
+  }
+}
+
 function applyLaunchUrl(rawValue) {
-  if (
-    !rawValue ||
-    !String(rawValue).startsWith("taxrocket-connect://")
-  ) {
+  if (!rawValue || !String(rawValue).startsWith("taxrocket-connect://")) {
     return false;
   }
 
   const parsed = new URL(rawValue);
+  if (
+    sameLaunchAlreadyOpening(
+      parsed.searchParams.get("token"),
+      parsed.searchParams.get("apiBaseUrl"),
+      parsed.searchParams.get("partition") ||
+        parsed.searchParams.get("partitionKey"),
+    )
+  ) {
+    focusPortalWindow();
+    return true;
+  }
+  if (localWorkerRunning) {
+    pushStatus(
+      "error",
+      "A navigation check is running. Wait for it to pause before reconnecting.",
+    );
+    return false;
+  }
   launchState = {
     flow: parsed.searchParams.get("flow") !== "dld" ? "fbr" : "dld",
     token: parsed.searchParams.get("token") || "",
     nonce: parsed.searchParams.get("nonce") || "",
     apiBaseUrl: sanitizeBaseUrl(parsed.searchParams.get("apiBaseUrl") || ""),
-    accountReference: "",
+    accountReference:
+      (parsed.searchParams.get("partitionKey") ||
+        parsed.searchParams.get("partition") ||
+        loadAgentState().partitionKey) === launchState.partitionKey
+        ? launchState.accountReference
+        : "",
     partitionKey:
       parsed.searchParams.get("partitionKey") ||
+      parsed.searchParams.get("partition") ||
       loadAgentState().partitionKey ||
       "",
-    deviceAuthToken: loadAgentState().deviceAuthToken || "",
+    deviceAuthToken: "",
     trustedDevicePublicId: loadAgentState().trustedDevicePublicId || "",
     allowedOrigins: [],
     backendAllowlist: [],
@@ -914,11 +1353,16 @@ function applyLaunchUrl(rawValue) {
         parsed.searchParams.get("successUrlPattern") ||
         "",
       loginUrl: parsed.searchParams.get("loginUrl") || "",
-      useMockIris: parsed.searchParams.get("flow") === "fbr",
+      useMockIris:
+        parsed.searchParams.get("useMockIris") === "true" ||
+        String(parsed.searchParams.get("loginUrl") || "").startsWith(
+          "mock-iris://",
+        ),
     }),
   };
   setTrustedDeviceState({
     apiBaseUrl: launchState.apiBaseUrl || loadAgentState().apiBaseUrl || "",
+    deviceAuthToken: "",
   });
   resetAutoCaptureState();
   publishLaunchState();
@@ -928,12 +1372,31 @@ function applyLaunchUrl(rawValue) {
       ? "Connection request received. Opening Iris sign-in now."
       : "Connection request received. Opening MyDLD sign-in now.",
   );
-  void createLoginWindow(true);
+  void createLoginWindow(true).catch((error) =>
+    pushStatus("error", error.message || "Could not open IRIS."),
+  );
 
   return true;
 }
 
 function applyLaunchPayload(payload) {
+  if (
+    sameLaunchAlreadyOpening(
+      payload?.token,
+      payload?.apiBaseUrl,
+      payload?.partitionKey,
+    )
+  ) {
+    focusPortalWindow();
+    return true;
+  }
+  if (localWorkerRunning) {
+    pushStatus(
+      "error",
+      "A navigation check is running. Wait for it to pause before reconnecting.",
+    );
+    return false;
+  }
   launchState = {
     flow: payload?.flow !== "dld" ? "fbr" : "dld",
     token: typeof payload?.token === "string" ? payload.token : "",
@@ -949,7 +1412,7 @@ function applyLaunchPayload(payload) {
       typeof payload?.partitionKey === "string"
         ? payload.partitionKey.trim()
         : loadAgentState().partitionKey || "",
-    deviceAuthToken: loadAgentState().deviceAuthToken || "",
+    deviceAuthToken: "",
     trustedDevicePublicId: loadAgentState().trustedDevicePublicId || "",
     allowedOrigins: Array.isArray(payload?.allowedOrigins)
       ? payload.allowedOrigins
@@ -967,6 +1430,7 @@ function applyLaunchPayload(payload) {
   };
   setTrustedDeviceState({
     apiBaseUrl: launchState.apiBaseUrl || loadAgentState().apiBaseUrl || "",
+    deviceAuthToken: "",
   });
   resetAutoCaptureState();
   publishLaunchState();
@@ -982,7 +1446,9 @@ function applyLaunchPayload(payload) {
       ? "Connection request received. Opening Iris sign-in now."
       : "Connection request received. Opening MyDLD sign-in now.",
   );
-  void createLoginWindow(true);
+  void createLoginWindow(true).catch((error) =>
+    pushStatus("error", error.message || "Could not open IRIS."),
+  );
   return true;
 }
 
@@ -1034,8 +1500,6 @@ async function ensureTrustedDeviceRegistration() {
     trustedDevicePublicId: result?.trustedDevice?.publicId || "",
   };
   publishLaunchState();
-  startLocalWorkerLoop();
-
   return result;
 }
 
@@ -1082,6 +1546,15 @@ function getWorkerTempDir(jobId) {
 }
 
 async function ensureWorkerWindow() {
+  if (launchState.flow === "fbr" && realPortalMode) {
+    const windowInstance = await createLoginWindow(false);
+    workerWindow = windowInstance;
+    windowInstance.setTitle(
+      `Tax Rocket IRIS — Navigation check [${AGENT_BUILD_TAG}]`,
+    );
+    windowInstance.show();
+    return windowInstance;
+  }
   if (workerWindow && !workerWindow.isDestroyed()) {
     return workerWindow;
   }
@@ -1105,6 +1578,11 @@ async function ensureWorkerWindow() {
     },
   });
 
+  pushStatus(
+    "progress",
+    `Agent window opened (partition: ${getWorkerPartition()}) [build ${AGENT_BUILD_TAG}]`,
+  );
+
   workerWindow.on("closed", () => {
     workerWindow = null;
   });
@@ -1118,6 +1596,16 @@ async function captureWindowScreenshot(windowInstance, label) {
     label,
     dataUrl: image.toDataURL(),
   };
+}
+
+/**
+ * Capture the live page's interactive elements (links, buttons, inputs,
+ * menu items) with their ids/classes/text. Attached to every job failure so
+ * the real IRIS 2.0 selector bundle can be written from EVIDENCE instead of
+ * guesswork — the agent is the only vantage point onto the logged-in DOM.
+ */
+async function captureDomEvidence(windowInstance) {
+  return irisNavigation.probeFrames(windowInstance);
 }
 
 async function collectPreFillComparison(windowInstance, portalFieldMap) {
@@ -1418,28 +1906,26 @@ function splitSelectorAlternatives(selector) {
  * alternatives. CSS parts are tried first, then text parts, polling until
  * the timeout. This is the real-IRIS-safe variant of clickSelector.
  */
-async function clickSelectorWithTextSupport(windowInstance, selector, timeoutMs = 15000) {
+async function clickSelectorWithTextSupport(
+  windowInstance,
+  selector,
+  timeoutMs = 15000,
+) {
   const parts = splitSelectorAlternatives(selector);
   const textParts = parts
     .filter((part) => part.toLowerCase().startsWith("text:"))
     .map((part) => part.slice(5).trim())
     .filter(Boolean);
-  const cssParts = parts.filter((part) => !part.toLowerCase().startsWith("text:"));
+  const cssParts = parts.filter(
+    (part) => !part.toLowerCase().startsWith("text:"),
+  );
   const start = Date.now();
-
-  if (cssParts.length > 0) {
-    try {
-      await waitForVisibleSelector(windowInstance, cssParts.join(","), timeoutMs);
-    } catch {
-      // CSS parts may simply not exist on the real portal; text parts below
-      // are the ones that matter there.
-    }
-  }
 
   // Fast path: a CSS part is immediately available.
   if (cssParts.length > 0) {
-    const clicked = await windowInstance.webContents.executeJavaScript(
-      `(() => {
+    const clicked = await windowInstance.webContents
+      .executeJavaScript(
+        `(() => {
         const el = document.querySelector(${JSON.stringify(cssParts.join(","))});
         if (!el) return false;
         const r = el.getBoundingClientRect();
@@ -1448,14 +1934,16 @@ async function clickSelectorWithTextSupport(windowInstance, selector, timeoutMs 
         el.click();
         return true;
       })()`,
-    ).catch(() => false);
+      )
+      .catch(() => false);
     if (clicked) return;
   }
 
   while (Date.now() - start < timeoutMs) {
     if (cssParts.length > 0) {
-      const clicked = await windowInstance.webContents.executeJavaScript(
-        `(() => {
+      const clicked = await windowInstance.webContents
+        .executeJavaScript(
+          `(() => {
           const el = document.querySelector(${JSON.stringify(cssParts.join(","))});
           if (!el) return false;
           const r = el.getBoundingClientRect();
@@ -1464,11 +1952,14 @@ async function clickSelectorWithTextSupport(windowInstance, selector, timeoutMs 
           el.click();
           return true;
         })()`,
-      ).catch(() => false);
+        )
+        .catch(() => false);
       if (clicked) return;
     }
     if (textParts.length > 0) {
-      const clicked = await findAndClickByText(windowInstance, textParts).catch(() => false);
+      const clicked = await findAndClickByText(windowInstance, textParts).catch(
+        () => false,
+      );
       if (clicked) return;
     }
     await new Promise((resolve) => setTimeout(resolve, 600));
@@ -1483,8 +1974,9 @@ async function clickSelectorWithTextSupport(windowInstance, selector, timeoutMs 
  * "trusted session confirmed".
  */
 async function isIrisLoginFormVisible(windowInstance) {
-  return await windowInstance.webContents.executeJavaScript(
-    `(() => {
+  return await windowInstance.webContents
+    .executeJavaScript(
+      `(() => {
       const inputs = Array.from(document.querySelectorAll('input[type="password"]'));
       const visible = inputs.filter((el) => {
         const rect = el.getBoundingClientRect();
@@ -1497,7 +1989,8 @@ async function isIrisLoginFormVisible(windowInstance) {
       return pageText.includes('login') || pageText.includes('forgot password') ||
         pageText.includes('password');
     })()`,
-  ).catch(() => false);
+    )
+    .catch(() => false);
 }
 
 /**
@@ -1524,90 +2017,76 @@ async function waitForIrisLogin(windowInstance, timeoutMs = 5 * 60 * 1000) {
 }
 
 /**
+ * Confirm the IRIS dashboard is ready before automation touches it.
+ *
+ * Mock mode: the ready selector is a fixture element, so a missing selector
+ * is a real failure and throws.
+ *
+ * Real portal: the trusted session may not have carried into this window, so
+ * wait for the user's IRIS login FIRST. Only then check the ready selector —
+ * and treat a selector timeout as advisory, not fatal: after a proven login
+ * a stale/wrong selector (e.g. the mock-only "#iris-dashboard-ready" default
+ * on the live portal) must not kill the job before automation starts. Set
+ * FBR_IRIS_READY_SELECTOR to the live dashboard element to restore the check.
+ */
+async function confirmIrisReadiness(
+  windowInstance,
+  config,
+  readySelector,
+  executionLog,
+) {
+  if (config.useMockIris) {
+    await waitForVisibleSelector(windowInstance, readySelector, 15000);
+    return;
+  }
+
+  const loggedIn = await waitForIrisLogin(windowInstance);
+  if (!loggedIn) {
+    throw new Error(
+      "IRIS login was not completed in the agent window. Restart the filing and complete the login (CNIC/NTN, password, captcha) inside the return window.",
+    );
+  }
+
+  // Arm the welcome-popup auto-closer IMMEDIATELY after login. Previously it
+  // was only armed later (inside navigation); if anything threw before that
+  // point the popup stayed open for the whole run. dismissIrisWelcomePopup
+  // arms a persistent in-page guard and attempts one close.
+  await dismissIrisWelcomePopup(windowInstance);
+
+  try {
+    await waitForVisibleSelector(windowInstance, readySelector, 15000);
+  } catch (error) {
+    executionLog.push({
+      step: STANDARD_LOG_STEPS.READINESS_CHECK,
+      label: "Ready selector not found on the live portal",
+      detail: `IRIS login is confirmed, but "${readySelector}" was not detected (${
+        error instanceof Error ? error.message : String(error)
+      }). Continuing on the live portal — set FBR_IRIS_READY_SELECTOR to the correct dashboard element to restore this check.`,
+    });
+  }
+}
+
+/**
  * Dismiss the IRIS 2.0 welcome/promotional popup that overlays the dashboard
  * after login ("Submit Your Income Tax Return ... LAST DATE ..." card).
  * The popup is typically a jQuery-UI style dialog whose close control is the
  * small (x) icon in the dialog title bar; ESC usually closes it too.
  */
 async function dismissIrisWelcomePopup(windowInstance) {
-  const attempt = await windowInstance.webContents.executeJavaScript(
-    `(() => {
-      const clickEl = (el) => {
-        try { el.scrollIntoView({ block: 'center' }); el.click(); return true; }
-        catch { return false; }
-      };
-      // Pass 1: known close-control selectors (broad, case-insensitive).
-      const closeSelectors = [
-        '.ui-dialog-titlebar-close', '[aria-label*="lose" i]',
-        '[data-dismiss="modal"]', '[data-bs-dismiss="modal"]',
-        'button[class*="close" i]', 'span[class*="close" i]',
-        'img[class*="close" i]', 'i[class*="close" i]', 'a[class*="close" i]',
-        '[class*="closeIcon" i]', '[class*="close-icon" i]',
-        '[class*="closeBtn" i]', '[class*="close-btn" i]'
-      ];
-      for (const sel of closeSelectors) {
-        for (const el of document.querySelectorAll(sel)) {
-          const rect = el.getBoundingClientRect();
-          const style = getComputedStyle(el);
-          if (rect.width > 0 && rect.height > 0 &&
-              style.display !== 'none' && style.visibility !== 'hidden') {
-            if (clickEl(el)) return 'selector:' + sel;
-          }
-        }
-      }
-      // Pass 2: find overlay dialog cards and click the small control at
-      // their top-right corner (the IRIS popup's (x) is an image/icon there).
-      const cards = Array.from(document.querySelectorAll('div, section')).filter((d) => {
-        const s = getComputedStyle(d);
-        return (s.position === 'fixed' || s.position === 'absolute') &&
-          d.offsetWidth > 300 && d.offsetHeight > 200;
-      });
-      cards.sort((a, b) =>
-        (parseInt(getComputedStyle(b).zIndex) || 0) -
-        (parseInt(getComputedStyle(a).zIndex) || 0));
-      for (const card of cards.slice(0, 5)) {
-        const cardRect = card.getBoundingClientRect();
-        const clickables = Array.from(card.querySelectorAll(
-          'a, button, img, [role="button"], span[onclick], i, svg'));
-        let best = null;
-        let bestDist = Infinity;
-        for (const el of clickables) {
-          const rect = el.getBoundingClientRect();
-          if (rect.width === 0 || rect.height === 0) continue;
-          if (rect.width > 90 || rect.height > 90) continue; // close icon is small
-          const dx = (cardRect.right - 26) - (rect.left + rect.width / 2);
-          const dy = (rect.top + rect.height / 2) - (cardRect.top + 26);
-          const dist = Math.hypot(dx, dy);
-          if (dist < bestDist) { bestDist = dist; best = el; }
-        }
-        if (best && bestDist < 90) {
-          const how = 'corner:' + best.tagName + ':' + String(best.className || '').slice(0, 40);
-          clickEl(best);
-          return how;
-        }
-      }
-      // Pass 3: hide the overlay/mask entirely so the dashboard is clickable.
-      let hidden = 0;
-      for (const card of cards) { card.style.display = 'none'; hidden++; }
-      const masks = document.querySelectorAll(
-        '.ui-widget-overlay, .modal-backdrop, [class*="overlay" i], [class*="mask" i]');
-      for (const mask of masks) {
-        const rect = mask.getBoundingClientRect();
-        if (rect.width > 200 && rect.height > 150) { mask.style.display = 'none'; hidden++; }
-      }
-      return hidden > 0 ? 'hidden:' + hidden : null;
-    })()`,
-  ).catch(() => null);
+  const result = await irisNavigation.probeFrames(windowInstance, {
+    action: "close-welcome",
+  });
+  return result.frames.some((frame) => frame.actionResult?.status === "clicked")
+    ? "identified-welcome-close"
+    : null;
+}
 
-  if (attempt) return attempt;
-
-  // ESC fallback: many IRIS dialogs close on Escape.
-  for (let i = 0; i < 2; i++) {
-    windowInstance.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
-    windowInstance.webContents.sendInputEvent({ type: "keyUp", keyCode: "Escape" });
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  return "esc";
+async function isIrisOverlayPresent(windowInstance) {
+  const result = await irisNavigation.probeFrames(windowInstance);
+  return (
+    result.frames.length === 0 ||
+    result.frames.some((frame) => frame.unavailable || frame.hasBlockingOverlay)
+  );
 }
 
 async function clickSelector(windowInstance, selector) {
@@ -1818,6 +2297,8 @@ async function updateLocalJobStatus(jobId, status, body = {}) {
     body: JSON.stringify({
       status,
       ...body,
+      ...(body.executionLog ? { logs: body.executionLog } : {}),
+      ...(body.errorMessage ? { error: body.errorMessage } : {}),
     }),
   });
 }
@@ -2863,7 +3344,204 @@ function isClassicPortalRoute(routeMetadata) {
   return routeMetadata?.routeFamily === "classic_individual_114";
 }
 
+async function runLocalIrisNavigationCheck(jobContext, job) {
+  assertNavigatorBuild();
+  const windowInstance = await ensureWorkerWindow();
+  const config = jobContext.taxAutomationConfig || {};
+  const packet = jobContext.filingPacket || {};
+  const taxYear = Number(
+    packet.taxYear || packet.snapshot?.filing?.taxYear || job?.payload?.taxYear,
+  );
+  if (!Number.isInteger(taxYear) || taxYear < 2000 || taxYear > 2100) {
+    throw new Error(
+      "The approved packet does not specify a valid tax year. No portal action was taken.",
+    );
+  }
+  const executionLog = [];
+  activeJobExecutionLog = executionLog;
+  const onStep = (step, detail) => {
+    executionLog.push({ step, label: step.replace(/_/g, " "), detail });
+    pushStatus("progress", detail);
+  };
+  onStep(
+    "live_pilot_boundary",
+    `Original 114(1), TY${taxYear}: existing draft first, otherwise new-return menu. Financial filling, Save and Submit remain disabled.`,
+  );
+  const taxpayerIdentifier = String(launchState.accountReference || "")
+    .trim()
+    .replace(/[ -]/g, "");
+  const stateKey = `${job.id}:${packet.packetHash || ""}:${taxYear}:${taxpayerIdentifier}`;
+  if (!navigationStates.has(stateKey)) navigationStates.set(stateKey, {});
+  navigationStates.get(stateKey).jobId = job.id;
+  lastNavigationOptions = { taxYear, taxpayerIdentifier };
+  onStep(
+    "agent_handoff",
+    `Main ${AGENT_BUILD_TAG}; navigator ${irisNavigation.BUILD_TAG}; openReturn=true; inspectSections=true; targetConfigured=${/^(?:\d{7}|\d{8}|\d{13})$/.test(taxpayerIdentifier)}.`,
+  );
+  if (lastTourStateKey !== stateKey) lastSectionTour = null;
+  lastTourStateKey = stateKey;
+  const requestedFamily = packet.snapshot?.routeMetadata?.routeFamily;
+  const supportedFamily =
+    !requestedFamily || requestedFamily === "normal_individual_114";
+  // Ignore mock checkpoint URLs entirely. All inspection occurs on the SAME
+  // authenticated BrowserWindow; createLoginWindow does not reload its SPA.
+  let outcome;
+  try {
+    outcome = supportedFamily
+      ? await irisNavigation.inspectNavigation(getLivePortalWindow, {
+          ...lastNavigationOptions,
+          openReturn: true,
+          state: navigationStates.get(stateKey),
+          inspectSections: true,
+          sectionIds: irisNavigation.ALL_SECTION_IDS,
+          beforeStep: () =>
+            ensureNavigationJobActive(job.id, taxpayerIdentifier),
+          onSectionCaptured: async (snapshot) => {
+            lastSectionTour = snapshot.sectionTour
+              ? { ...snapshot.sectionTour, jobId: job.id, taxYear }
+              : null;
+            writePortalInspectionToDisk(
+              { ...snapshot, sectionTour: lastSectionTour },
+              job,
+            );
+          },
+          hosts: config.portalHostAllowlist?.length
+            ? config.portalHostAllowlist
+            : irisNavigation.DEFAULT_HOSTS,
+          onStep,
+        })
+      : {
+          inspection: await irisNavigation.probeFrames(
+            getLivePortalWindow,
+            lastNavigationOptions,
+          ),
+          requiredAction: "portal_unsupported_route",
+        };
+  } catch (error) {
+    if (
+      error.code !== "NAVIGATION_TARGET_CHANGED" &&
+      error.code !== "NAVIGATION_GUARD_UNAVAILABLE"
+    )
+      throw error;
+    if (error.code === "NAVIGATION_TARGET_CHANGED") {
+      lastSectionTour = null;
+      navigationStates.delete(stateKey);
+    }
+    outcome = {
+      inspection: await irisNavigation.probeFrames(getLivePortalWindow, {
+        taxYear,
+        taxpayerIdentifier: launchState.accountReference || "",
+      }),
+      requiredAction:
+        error.code === "NAVIGATION_TARGET_CHANGED"
+          ? "portal_identity_changed"
+          : "portal_job_check_unavailable",
+    };
+    onStep("navigation_guard", error.message);
+  }
+  if (outcome.inspection.sectionTour) {
+    lastSectionTour = {
+      ...outcome.inspection.sectionTour,
+      jobId: job.id,
+      taxYear,
+    };
+  }
+  if (lastSectionTour)
+    outcome.inspection = {
+      ...outcome.inspection,
+      sectionTour: lastSectionTour,
+    };
+  const inspectionPath = writePortalInspectionToDisk(outcome.inspection, job);
+  const rows = outcome.inspection.frames.flatMap((frame) => frame.rows || []);
+  const messages = {
+    session_reconnect:
+      "Complete IRIS sign-in in the existing agent window, then retry the navigation check. No form was changed.",
+    portal_popup:
+      "An IRIS dialog is still open. Close only the welcome popup, or complete the required verification locally, then retry. The agent did not hide or bypass it.",
+    portal_inspection: `IRIS structure captured: ${rows.length} visible return/wealth draft row(s). No values were filled, saved or submitted.`,
+    portal_readiness_unverified:
+      "The portal screen could not be positively identified yet; no login prompt was detected. Keep the intended IRIS window open, wait for it to finish loading and Retry. Export the current structure if this repeats. The agent did not assume you are logged out.",
+    portal_identity_required:
+      "Enter the intended taxpayer CNIC/NTN in the desktop agent main window (local only), then Retry navigation. It must match the draft and the opened return.",
+    portal_taxpayer_mismatch:
+      "The draft/return registration number does not match the locally entered target, or could not be verified. Check the correct IRIS account and target CNIC/NTN. No tax values were changed.",
+    portal_document_mismatch:
+      "The document form, full-year period or tax year is not the requested original 114(1) return. Check the correct draft manually; the agent will not switch or create a different document blindly.",
+    portal_draft_ambiguous:
+      "Multiple matching drafts were found. Open the intended draft manually, then Retry. No draft was chosen automatically.",
+    portal_draft_list_incomplete:
+      "The complete IT Declaration list is not visible (pagination/filter/count mismatch). Show all rows or open the intended draft manually, then Retry. The agent did not assume the draft is missing or open a new-return entry.",
+    portal_new_return_setup: `No matching draft was found in the complete displayed list. The new Original TY2026+ return menu is open. Select the intended 114(1) form and TY${taxYear} period locally, handle any required setup questions, then Retry. Do not submit the return. No Create/Save/Submit control was clicked by the agent.`,
+    portal_sections_inspected:
+      "The seven requested Data sections plus Payment and Attachment were inspected. Each grid has its own headers and row context in the export. This is NOT a filed return: no amounts, uploads or payments were made and Save/Submit were not clicked.",
+    portal_section_navigation:
+      "A section menu could not be opened safely. The completed sections are retained. Export the current structure and Retry from this checkpoint; no amounts were changed.",
+    portal_section_capture:
+      "The selected section did not expose a stable new field grid or explicit empty state. Previous-section fields were not mislabeled as this section. Export the current structure; Retry resumes this section.",
+    portal_identity_changed:
+      "The local taxpayer target changed while the agent was working. Old section checkpoints were cleared. Confirm the intended target in the desktop main window and Retry.",
+    portal_job_check_unavailable:
+      "The desktop could not check the current web job. Make sure the fix13 status API route is installed and the web server is running, then Retry. This is not an IRIS-login error.",
+    portal_fields_verified: `Matching original 114(1) return for TY${taxYear} opened. Salary's four-column layout and editable/calculated cells were verified. This navigation test is finished; no amounts were entered and nothing was saved or submitted.`,
+    portal_fields_unverified:
+      "The document opened, but the expected Salary field layout is not ready/verified. Export IRIS structure for review. No amount fields were changed.",
+    portal_navigation:
+      "The expected navigation control or opened document was not verified. Export the current IRIS structure. If a new-return wizard is displayed, finish only its form/year setup locally and Retry; do not submit.",
+    portal_unsupported_route:
+      "This navigation build supports original full-year 114(1) only. The approved packet requests a different route, so it was not substituted automatically.",
+  };
+  const pauseMessage =
+    outcome.pauseMessage ||
+    messages[outcome.requiredAction] ||
+    messages.portal_inspection;
+  const result = {
+    mode: "live_return_navigation_only",
+    requiredAction: outcome.requiredAction,
+    message: pauseMessage,
+    pauseReason: pauseMessage,
+    taxYear,
+    returnTypeConfirmed: outcome.inspection.frames.some(
+      (frame) =>
+        frame.document?.originalFullYear &&
+        frame.document?.taxYear === taxYear &&
+        frame.document?.identityStatus === "match",
+    ),
+    submitted: false,
+    navigationVerified: [
+      "portal_fields_verified",
+      "portal_sections_inspected",
+    ].includes(outcome.requiredAction),
+    sectionTourComplete: outcome.requiredAction === "portal_sections_inspected",
+    newReturnMenuOpened: Boolean(
+      navigationStates.get(stateKey)?.newEntryOpened,
+    ),
+    selectorBundle: getSelectorBundleSignal(jobContext),
+    domEvidence: outcome.inspection,
+    captures: [],
+  };
+  onStep(
+    "inspection_pause",
+    `Navigation checkpoint: ${outcome.requiredAction}. Local structure file: ${inspectionPath}`,
+  );
+  await updateLocalJobStatus(job.id, "awaiting_user_action", {
+    pauseAction: outcome.requiredAction,
+    pauseMessage,
+    result,
+    executionLog,
+  });
+  return {
+    paused: true,
+    pauseAction: outcome.requiredAction,
+    pauseMessage,
+    result,
+    executionLog,
+  };
+}
+
 async function runLocalTaxDryRunFlow(jobContext) {
+  if (realPortalMode) {
+    return runLocalIrisNavigationCheck(jobContext, jobContext.job);
+  }
   const windowInstance = await ensureWorkerWindow();
   const config = jobContext.taxAutomationConfig || {};
   const packet = jobContext.filingPacket || {};
@@ -2872,6 +3550,7 @@ async function runLocalTaxDryRunFlow(jobContext) {
     ? snapshot.portalFieldMap
     : [];
   const executionLog = [];
+  activeJobExecutionLog = executionLog;
   const routeSelector = config?.routeSelector || null;
   const routeMetadata = snapshot.routeMetadata || {};
   const selectorBundle = getSelectorBundleSignal(jobContext);
@@ -2892,7 +3571,14 @@ async function runLocalTaxDryRunFlow(jobContext) {
     await windowInstance.loadURL(config?.readiness?.loginUrl || entryUrl);
   }
 
-  await waitForVisibleSelector(windowInstance, readySelector, 15000);
+  // Real portal: login confirmation first, advisory selector check second —
+  // see confirmIrisReadiness. The old order timed out on the live portal.
+  await confirmIrisReadiness(
+    windowInstance,
+    config,
+    readySelector,
+    executionLog,
+  );
   executionLog.push({
     step: STANDARD_LOG_STEPS.READINESS_CHECK,
     label: "Trusted Iris session confirmed",
@@ -3128,8 +3814,11 @@ function getPilotStateFromContext(jobContext) {
 
   if (live && typeof live === "object") {
     return {
-      phase: typeof live.phase === "string" && live.phase ? live.phase : "start",
-      confirmations: Array.isArray(live.confirmations) ? live.confirmations : [],
+      phase:
+        typeof live.phase === "string" && live.phase ? live.phase : "start",
+      confirmations: Array.isArray(live.confirmations)
+        ? live.confirmations
+        : [],
     };
   }
 
@@ -3164,7 +3853,16 @@ async function pauseAssistedPilot(job, windowInstance, input) {
     }
     await fsMod.writeFile(
       path.join(dumpDir, `pause-${input.requiredAction}-${stamp}.json`),
-      JSON.stringify({ jobId: job.id, requiredAction: input.requiredAction, pageUrl, at: stamp }, null, 2),
+      JSON.stringify(
+        {
+          jobId: job.id,
+          requiredAction: input.requiredAction,
+          pageUrl,
+          at: stamp,
+        },
+        null,
+        2,
+      ),
       "utf8",
     );
     pushStatus(
@@ -3194,10 +3892,17 @@ async function pauseAssistedPilot(job, windowInstance, input) {
 
   return {
     paused: true,
+    pauseAction: input.requiredAction,
+    pauseMessage: input.pauseReason || input.message,
+    executionLog: input.executionLog,
+    result: { requiredAction: input.requiredAction, message: input.message },
   };
 }
 
 async function runLocalTaxAssistedFilingFlow(jobContext, job) {
+  if (realPortalMode) {
+    return runLocalIrisNavigationCheck(jobContext, job);
+  }
   const windowInstance = await ensureWorkerWindow();
   const config = jobContext.taxAutomationConfig || {};
   const packet = jobContext.filingPacket || {};
@@ -3206,6 +3911,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     ? snapshot.portalFieldMap
     : [];
   const executionLog = [];
+  activeJobExecutionLog = executionLog;
   const pilotState = getPilotStateFromContext(jobContext);
   const assistedConfig = config.assistedFiling || {};
   const routeSelector = config?.routeSelector || null;
@@ -3231,25 +3937,22 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   // After Resume, skip dashboard + return.html. Re-loading the filing
   // form is what flashed Tax Payable / Opening Wealth over password-reset.
   if (shouldFillReturn) {
-  await windowInstance.loadURL(dashboardUrl);
-  await waitForVisibleSelector(windowInstance, readySelector, 15000);
-  // Real portal: if the IRIS login form is showing, the trusted session did
-  // not carry into this window — wait for the user to log in here instead of
-  // pretending the session was confirmed.
-  if (!config.useMockIris) {
-    const loggedIn = await waitForIrisLogin(windowInstance);
-    if (!loggedIn) {
-      throw new Error(
-        "IRIS login was not completed in the agent window. Restart the filing and complete the login (CNIC/NTN, password, captcha) inside the return window.",
-      );
-    }
-  }
-  executionLog.push({
-    step: STANDARD_LOG_STEPS.READINESS_CHECK,
-    label: "Trusted Iris session confirmed",
-    detail:
-      "Desktop worker validated the trusted local Iris session before entering the live pilot.",
-  });
+    await windowInstance.loadURL(dashboardUrl);
+    // Real portal: confirm the IRIS login FIRST, then the ready selector.
+    // Waiting on the selector first timed out on the live portal (mock-only
+    // default selector) and killed the job before any field was filled.
+    await confirmIrisReadiness(
+      windowInstance,
+      config,
+      readySelector,
+      executionLog,
+    );
+    executionLog.push({
+      step: STANDARD_LOG_STEPS.READINESS_CHECK,
+      label: "Trusted Iris session confirmed",
+      detail:
+        "Desktop worker validated the trusted local Iris session before entering the live pilot.",
+    });
 
     // IRIS 2.0 shows a promotional popup over the dashboard after login.
     // It must be dismissed or it swallows every later click.
@@ -3260,10 +3963,32 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
         await new Promise((resolve) => setTimeout(resolve, 1200));
         if (dismissedHow && dismissedHow !== "esc") break;
       }
+
+      // Verify the popup is REALLY gone. If automation could not close it,
+      // hold here (up to 2 min) so the user can close it manually — the
+      // status message tells them exactly that.
+      let overlayStillPresent = await isIrisOverlayPresent(windowInstance);
+      if (overlayStillPresent) {
+        pushStatus(
+          "progress",
+          "The IRIS welcome popup is still open. Close it in the agent window — automation continues automatically once it is gone.",
+        );
+        const manualWaitStart = Date.now();
+        while (Date.now() - manualWaitStart < 120000) {
+          overlayStillPresent = await isIrisOverlayPresent(windowInstance);
+          if (!overlayStillPresent) break;
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+
       executionLog.push({
         step: "welcome_popup_dismissed",
         label: "IRIS welcome popup dismissed",
-        detail: `Dashboard popup closed via ${dismissedHow || "no attempt"}.`,
+        detail: `Dashboard popup closed via ${dismissedHow || "no attempt"}${
+          overlayStillPresent
+            ? " (WARNING: overlay still present after automated and manual-close wait)"
+            : ""
+        }.`,
       });
     }
 
@@ -3430,27 +4155,27 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   }
 
   if (shouldFillReturn) {
-  executionLog.push({
-    step: STANDARD_LOG_STEPS.PREFILL_COMPARE,
-    label: "Pre-fill comparison captured",
-    detail:
-      prefillComparison.length > 0
-        ? `${prefillComparison.length} existing portal values differed from the approved packet before fill.`
-        : "No material pre-fill differences were detected before assisted fill.",
-  });
+    executionLog.push({
+      step: STANDARD_LOG_STEPS.PREFILL_COMPARE,
+      label: "Pre-fill comparison captured",
+      detail:
+        prefillComparison.length > 0
+          ? `${prefillComparison.length} existing portal values differed from the approved packet before fill.`
+          : "No material pre-fill differences were detected before assisted fill.",
+    });
 
-  captures.push(
-    await captureWindowScreenshot(
-      windowInstance,
-      STANDARD_CAPTURE_LABELS.PREFILL_COMPARE,
-    ),
-  );
-  captures.push(
-    await captureWindowScreenshot(
-      windowInstance,
-      STANDARD_CAPTURE_LABELS.FIELD_FILL,
-    ),
-  );
+    captures.push(
+      await captureWindowScreenshot(
+        windowInstance,
+        STANDARD_CAPTURE_LABELS.PREFILL_COMPARE,
+      ),
+    );
+    captures.push(
+      await captureWindowScreenshot(
+        windowInstance,
+        STANDARD_CAPTURE_LABELS.FIELD_FILL,
+      ),
+    );
   }
 
   // ── Phase 15.5c F9: Classic portal has no mid-filing password reset ──
@@ -3517,7 +4242,9 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   if (
     pilotState.phase === "after_otp_captcha_pin" &&
     !isClassic &&
-    Number(snapshot.returnSummary?.taxPayable || snapshot.filing?.taxPayable || 0) > 0
+    Number(
+      snapshot.returnSummary?.taxPayable || snapshot.filing?.taxPayable || 0,
+    ) > 0
   ) {
     await windowInstance.loadURL(
       resolveMockIrisUrl(assistedConfig.paymentUrl || "mock-iris://payment"),
@@ -3677,7 +4404,9 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     // Enforce ready_to_submit gate: if payment is required and submit is not unlocked,
     // pause for user intervention
     if (
-      Number(snapshot.returnSummary?.taxPayable || snapshot.filing?.taxPayable || 0) > 0 &&
+      Number(
+        snapshot.returnSummary?.taxPayable || snapshot.filing?.taxPayable || 0,
+      ) > 0 &&
       !paymentVerification.submitUnlocked
     ) {
       return pauseAssistedPilot(job, windowInstance, {
@@ -3776,56 +4505,86 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
  * truth needed to write real-portal selectors without guessing.
  * Returns the dump folder path (also embedded into the error message).
  */
+function writePortalInspectionToDisk(inspection, job = null) {
+  const state = lastTourStateKey
+    ? navigationStates.get(lastTourStateKey)
+    : null;
+  if (
+    !inspection.interactionDiagnostics &&
+    state?.interactionDiagnostics?.length &&
+    (!job || state.jobId === job.id)
+  ) {
+    inspection = {
+      ...inspection,
+      interactionDiagnostics: state.interactionDiagnostics,
+    };
+  }
+  if (
+    !inspection.sectionTour &&
+    lastSectionTour &&
+    (!job || lastSectionTour.jobId === job.id)
+  ) {
+    inspection = { ...inspection, sectionTour: lastSectionTour };
+  }
+  const dir = getAgentLogDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const payload = {
+    build: AGENT_BUILD_TAG,
+    navigatorBuild: irisNavigation.BUILD_TAG,
+    savedAt: new Date().toISOString(),
+    mode: "live_return_navigation_only",
+    taxYear: job?.payload?.taxYear || lastNavigationOptions.taxYear || null,
+    notice:
+      "No input values, storage, cookies, HTML or screenshots captured. Review metadata before sharing.",
+    inspection,
+  };
+  const filePath = path.join(dir, "latest-portal-inspection.json");
+  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf8");
+  return filePath;
+}
+
 async function saveFailureDump(job, error) {
   try {
-    const fsMod = await import("fs/promises");
-    const dumpDir = getWorkerTempDir(job.id);
-    await fsMod.mkdir(dumpDir, { recursive: true });
-    const info = {
-      jobId: job.id,
-      jobType: job.type,
-      error: error instanceof Error ? error.message : String(error),
-      dumpedAt: new Date().toISOString(),
+    const inspection = await captureDomEvidence(workerWindow || loginWindow);
+    const filePath = writePortalInspectionToDisk(inspection, job);
+    pushStatus("progress", `Read-only portal structure saved to: ${filePath}`);
+    return path.dirname(filePath);
+  } catch {
+    return null;
+  }
+}
+
+// Persist the full outcome of a local job to a user-findable folder so it can
+// be attached/reviewed without Prisma Studio:
+//   <user home>/TaxRocketAgentLogs/latest-job.json  (+ per-job file)
+function getAgentLogDir() {
+  return path.join(app.getPath("home"), "TaxRocketAgentLogs");
+}
+
+async function writeJobLogToDisk(job, data) {
+  try {
+    const dir = getAgentLogDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const id = String(job?.publicId || job?.id || "unknown").replace(
+      /[^a-zA-Z0-9_-]/g,
+      "",
+    );
+    const payload = {
+      savedAt: new Date().toISOString(),
+      jobId: job?.id || null,
+      jobType: job?.type || null,
+      build: AGENT_BUILD_TAG,
+      navigatorBuild: irisNavigation.BUILD_TAG,
+      runtimeMainFile: __filename,
+      realPortalMode,
+      ...data,
     };
-    if (workerWindow && !workerWindow.isDestroyed()) {
-      try {
-        info.pageUrl = workerWindow.webContents.getURL();
-        info.pageTitle = await workerWindow.webContents.getTitle();
-        const html = await workerWindow.webContents.executeJavaScript(
-          "document.documentElement.outerHTML",
-        );
-        if (html) {
-          await fsMod.writeFile(
-            path.join(dumpDir, "failure-page.html"),
-            html,
-            "utf8",
-          );
-        }
-        try {
-          const shot = await workerWindow.webContents.capturePage();
-          await fsMod.writeFile(
-            path.join(dumpDir, "failure-screenshot.png"),
-            shot.toPNG(),
-          );
-        } catch {}
-      } catch {}
-    }
-    await fsMod.writeFile(
-      path.join(dumpDir, "failure-info.json"),
-      JSON.stringify(info, null, 2),
-      "utf8",
-    );
-    pushStatus(
-      "error",
-      `Job failed. Evidence saved in folder: ${dumpDir} (failure-page.html, failure-screenshot.png, failure-info.json).`,
-    );
-    return dumpDir;
-  } catch (dumpError) {
-    pushStatus(
-      "error",
-      "Job failed and the evidence dump could not be written: " +
-        (dumpError instanceof Error ? dumpError.message : String(dumpError)),
-    );
+    const json = JSON.stringify(payload, null, 2);
+    fs.writeFileSync(path.join(dir, `job-${id}.json`), json, "utf8");
+    fs.writeFileSync(path.join(dir, "latest-job.json"), json, "utf8");
+    return path.join(dir, "latest-job.json");
+  } catch (error) {
+    console.log("[agent] writeJobLogToDisk failed:", String(error));
     return null;
   }
 }
@@ -3835,22 +4594,56 @@ async function processLocalJob(job) {
     return;
   }
 
-  const context = await loadLocalJobContext(job.id);
-  if (job.payload && typeof job.payload === "object") {
-    context.job = { ...(context.job || {}), id: job.id, payload: job.payload };
-    context.payload = job.payload;
-    if (job.payload.livePilotState) {
-      context.livePilotState = job.payload.livePilotState;
-    }
-  }
-  pushStatus(
-    "progress",
-    `Running local desktop automation for job ${job.publicId || job.id}.`,
-  );
-
-  const localDocuments = await downloadJobDocuments(job.id, context.documents);
-
+  let context = {};
+  let localDocuments = [];
   try {
+    context = await loadLocalJobContext(job.id);
+    context.job = { ...(context.job || {}), id: job.id };
+    if (job.payload && typeof job.payload === "object") {
+      context.job = {
+        ...(context.job || {}),
+        id: job.id,
+        payload: job.payload,
+      };
+      context.payload = job.payload;
+      if (job.payload.livePilotState) {
+        context.livePilotState = job.payload.livePilotState;
+      }
+    }
+
+    // The JOB config — not the launch payload — decides mock vs real. The
+    // localhost-bridge launch path carries no loginUrl, so launch-based guards
+    // misread real handoffs as mock there. useMockIris === false in the job
+    // context is authoritative for real-portal sessions.
+    const jobAutomationConfig = context.taxAutomationConfig || {};
+    const jobLoginUrl = String(jobAutomationConfig.readiness?.loginUrl || "");
+    realPortalMode =
+      jobAutomationConfig.useMockIris === false ||
+      /^https?:\/\//i.test(jobLoginUrl) ||
+      /^https?:\/\//i.test(
+        String(launchState.desktopAuthConfig?.loginUrl || ""),
+      );
+    realPortalLoginUrl = /^https?:\/\//i.test(jobLoginUrl)
+      ? jobLoginUrl
+      : /^https?:\/\//i.test(
+            String(launchState.desktopAuthConfig?.loginUrl || ""),
+          )
+        ? launchState.desktopAuthConfig.loginUrl
+        : "https://iris.fbr.gov.pk/";
+    if (realPortalMode) {
+      pushStatus(
+        "progress",
+        "Real IRIS mode active (job config) — local mock pages are disabled for this job.",
+      );
+    }
+
+    pushStatus(
+      "progress",
+      `Running local desktop automation for job ${job.publicId || job.id}.`,
+    );
+
+    localDocuments = await downloadJobDocuments(job.id, context.documents);
+
     await updateLocalJobStatus(job.id, "running");
     const outcome =
       job.type === "tax_dry_run"
@@ -3862,9 +4655,22 @@ async function processLocalJob(job) {
               executionLog: [],
             };
     if (outcome?.paused) {
+      const logPath = await writeJobLogToDisk(job, {
+        finalStatus: "paused",
+        pauseAction: outcome.pauseAction || null,
+        pauseMessage: outcome.pauseMessage || null,
+        result: outcome.result || null,
+        executionLog: outcome.executionLog || [],
+      });
+      if (logPath) {
+        pushStatus("progress", `Job log saved to: ${logPath}`);
+      }
       pushStatus(
-        "progress",
-        "Local desktop job is waiting for a user action before it can continue.",
+        outcome.pauseAction === "portal_sections_inspected"
+          ? "success"
+          : "progress",
+        outcome.pauseMessage ||
+          "Local desktop job is waiting for a user action before it can continue.",
       );
       return;
     }
@@ -3872,8 +4678,28 @@ async function processLocalJob(job) {
       result: outcome.result,
       executionLog: outcome.executionLog,
     });
+    const doneLogPath = await writeJobLogToDisk(job, {
+      finalStatus: "completed",
+      result: outcome.result || null,
+      executionLog: outcome.executionLog || [],
+    });
+    if (doneLogPath) {
+      pushStatus("progress", `Job log saved to: ${doneLogPath}`);
+    }
     pushStatus("success", "Local desktop automation completed successfully.");
   } catch (error) {
+    if (error?.code === "NAVIGATION_JOB_STOPPED") {
+      await writeJobLogToDisk(job, {
+        finalStatus: "stopped",
+        errorMessage: error.message,
+        result: { submitted: false, sectionTour: lastSectionTour },
+        executionLog: Array.isArray(activeJobExecutionLog)
+          ? activeJobExecutionLog
+          : [],
+      });
+      pushStatus("progress", error.message);
+      return;
+    }
     const message =
       error instanceof Error
         ? error.message
@@ -3882,7 +4708,13 @@ async function processLocalJob(job) {
     const messageWithDump = failureDumpDir
       ? `${message} [Evidence: ${failureDumpDir}]`
       : message;
+    // Live-DOM snapshot of the worker window at failure time — this is what
+    // makes the next iteration's real-IRIS selector bundle evidence-based.
+    const domEvidence = await captureDomEvidence(workerWindow);
     const failureExecutionLog = [
+      ...(Array.isArray(activeJobExecutionLog)
+        ? activeJobExecutionLog.map((entry) => ({ ...entry }))
+        : []),
       {
         step: STANDARD_LOG_STEPS.FAILURE,
         label: "Local desktop job failed",
@@ -3908,6 +4740,7 @@ async function processLocalJob(job) {
           selectorBundle: getSelectorBundleSignal(context),
           selectorDriftDiagnostics:
             recoverableAssistedIssue.selectorDriftDiagnostics,
+          domEvidence,
           recoveryActions: buildRecoveryActions(message, {
             selectorDriftDiagnostics:
               recoverableAssistedIssue.selectorDriftDiagnostics,
@@ -3916,6 +4749,23 @@ async function processLocalJob(job) {
         },
         executionLog: failureExecutionLog,
       });
+      const recoverableLogPath = await writeJobLogToDisk(job, {
+        finalStatus: "awaiting_user_action",
+        errorMessage: message,
+        executionLog: failureExecutionLog,
+        result: {
+          message: recoverableAssistedIssue.message,
+          pauseReason: recoverableAssistedIssue.pauseReason,
+          requiredAction: recoverableAssistedIssue.requiredAction,
+          userInstruction: recoverableAssistedIssue.userInstruction,
+          selectorDriftDiagnostics:
+            recoverableAssistedIssue.selectorDriftDiagnostics,
+          domEvidence,
+        },
+      });
+      if (recoverableLogPath) {
+        pushStatus("progress", `Job log saved to: ${recoverableLogPath}`);
+      }
       pushStatus(
         "progress",
         "Assisted filing is waiting for a supervised recovery confirmation.",
@@ -3933,14 +4783,29 @@ async function processLocalJob(job) {
       result: {
         selectorBundle: getSelectorBundleSignal(context),
         selectorDriftDiagnostics,
+        domEvidence,
         recoveryActions: buildRecoveryActions(message, {
           selectorDriftDiagnostics,
         }),
       },
       executionLog: failureExecutionLog,
     });
+    const failedLogPath = await writeJobLogToDisk(job, {
+      finalStatus: "failed",
+      errorMessage: message,
+      executionLog: failureExecutionLog,
+      result: {
+        selectorBundle: getSelectorBundleSignal(context),
+        selectorDriftDiagnostics,
+        domEvidence,
+      },
+    });
+    if (failedLogPath) {
+      pushStatus("progress", `Job log saved to: ${failedLogPath}`);
+    }
     pushStatus("error", message);
   } finally {
+    activeJobExecutionLog = null;
     await cleanupJobDocuments(job.id);
   }
 }
@@ -3955,9 +4820,19 @@ async function runLocalWorkerCycle() {
   const apiBaseUrl = getApiBaseUrl();
 
   if (!deviceAuthToken || !apiBaseUrl) {
+    // Silent polling used to hide exactly the case where Start Filing looks
+    // dead in the web app. Announce it once per idle streak instead.
+    if (!workerIdleAnnounced) {
+      workerIdleAnnounced = true;
+      pushStatus(
+        "idle",
+        "Worker idle: trusted-device token missing. Open the agent from the web app ('Open agent'), complete the portal sign-in, then press Start Filing.",
+      );
+    }
     return;
   }
 
+  workerIdleAnnounced = false;
   localWorkerRunning = true;
 
   try {
@@ -3966,6 +4841,11 @@ async function runLocalWorkerCycle() {
     if (!job) {
       return;
     }
+
+    pushStatus(
+      "progress",
+      `Job claimed: ${job.type || job.jobType || "unknown"} (${job.status || "?"}) — starting automation [build ${AGENT_BUILD_TAG}]`,
+    );
 
     await processLocalJob(job);
   } catch (error) {
@@ -3982,9 +4862,8 @@ async function runLocalWorkerCycle() {
 
 function getDeepLinkArgument(argv) {
   return (
-    (argv || []).find(
-      (value) =>
-        String(value).startsWith("taxrocket-connect://"),
+    (argv || []).find((value) =>
+      String(value).startsWith("taxrocket-connect://"),
     ) || ""
   );
 }
@@ -4160,6 +5039,12 @@ function createMainWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, "renderer.html"));
+  mainWindow.webContents.once("did-finish-load", () => {
+    pushStatus(
+      "success",
+      `Agent started — main ${AGENT_BUILD_TAG}; navigator ${irisNavigation.BUILD_TAG}. Both versions must match.`,
+    );
+  });
 }
 
 function scheduleAutoCapture(reason) {
@@ -4211,6 +5096,25 @@ async function attemptAutoCapture(reason) {
     return;
   }
 
+  // The IRIS login page shares the portal domain, so the URL check above
+  // matches BEFORE the user has signed in. Waiting on the (mock-only)
+  // ready selector there produced a scary red "#iris-dashboard-ready"
+  // timeout on every login. Skip while a login form is on screen — the
+  // load watchers will re-trigger once the real dashboard appears.
+  if (
+    launchState.flow === "fbr" &&
+    !launchState.desktopAuthConfig.useMockIris &&
+    !irisNavigation.isAuthenticated(
+      await irisNavigation.probeFrames(loginWindow),
+    )
+  ) {
+    pushStatus(
+      "progress",
+      "IRIS login screen detected. Complete the sign-in — the device is marked ready automatically afterwards.",
+    );
+    return;
+  }
+
   if (autoCaptureState.inProgress || autoCaptureState.completed) {
     return;
   }
@@ -4237,103 +5141,126 @@ async function attemptAutoCapture(reason) {
     pushStatus(
       "success",
       launchState.flow === "fbr"
-        ? "This trusted desktop device is ready for Iris dry runs. You can return to the web app."
+        ? "IRIS login detected. Keep this portal window open. Return to the web app to start the navigation check."
         : "This trusted desktop device is ready for MyDLD automation. You can return to the web app.",
     );
-    if (loginWindow && !loginWindow.isDestroyed()) {
+    if (
+      loginWindow &&
+      !loginWindow.isDestroyed() &&
+      launchState.desktopAuthConfig.useMockIris
+    ) {
       loginWindow.close();
     }
   } catch (error) {
     autoCaptureState.inProgress = false;
+    // Not a hard error: the ready check can legitimately run while the
+    // portal is still mid-navigation. Surface it as progress — the load
+    // watchers re-trigger capture automatically.
     pushStatus(
-      "error",
-      error instanceof Error
-        ? error.message
-        : "This desktop device could not be marked ready automatically.",
+      "progress",
+      `Device-ready check not complete yet (${
+        error instanceof Error ? error.message : "portal still loading"
+      }). It will retry automatically once the portal login/dashboard has finished loading.`,
     );
   }
 }
 
 function attachLoginWindowWatchers(windowInstance) {
+  if (windowInstance.taxRocketWatchersAttached) return;
+  windowInstance.taxRocketWatchersAttached = true;
+  configurePortalChildWindows(windowInstance);
   const triggerIfReady = () => {
-    const currentUrl = windowInstance.webContents.getURL();
-    if (isCurrentPortalReadyUrl(currentUrl)) {
+    if (windowInstance !== loginWindow || windowInstance.isDestroyed()) return;
+    if (isCurrentPortalReadyUrl(windowInstance.webContents.getURL()))
       scheduleAutoCapture("login-detected");
-    }
   };
-
-  windowInstance.webContents.on("did-finish-load", triggerIfReady);
-  windowInstance.webContents.on("did-navigate", triggerIfReady);
-  windowInstance.webContents.on("did-navigate-in-page", triggerIfReady);
-  windowInstance.webContents.on("did-stop-loading", triggerIfReady);
+  for (const event of [
+    "did-finish-load",
+    "did-navigate",
+    "did-navigate-in-page",
+    "did-stop-loading",
+  ]) {
+    windowInstance.webContents.on(event, triggerIfReady);
+  }
+  const timer = setInterval(triggerIfReady, 2500);
+  windowInstance.on("closed", () => {
+    clearInterval(timer);
+    if (loginWindow === windowInstance) {
+      loginWindow = null;
+      clearAutoCaptureTimer();
+      resetAutoCaptureState();
+      navigationStates.clear();
+      lastSectionTour = null;
+      lastTourStateKey = null;
+    }
+    if (workerWindow === windowInstance) workerWindow = null;
+  });
 }
 
 async function createLoginWindow(openFresh = false) {
-  if (launchState.token && launchState.apiBaseUrl) {
-    await ensureTrustedDeviceRegistration();
-  }
-
-  const partitionKey =
-    launchState.partitionKey || loadAgentState().partitionKey || "default";
-  const partition =
-    launchState.flow === "fbr"
-      ? `persist:fbr-iris-${partitionKey}`
-      : `persist:dld-portal-${partitionKey}`;
-
-  if (loginWindow && !loginWindow.isDestroyed()) {
-    if (openFresh) {
-      loginWindow.loadURL(resolveDesktopLoginUrl());
-      pushStatus(
-        "progress",
-        launchState.flow === "fbr"
-          ? "Iris sign-in opened. Complete the local sign-in and we will continue automatically."
-          : "MyDLD sign-in opened. Complete the official sign-in and we will continue automatically.",
-      );
+  if (loginWindowPromise) return loginWindowPromise;
+  loginWindowPromise = (async () => {
+    if (
+      launchState.token &&
+      launchState.apiBaseUrl &&
+      !launchState.deviceAuthToken
+    ) {
+      await ensureTrustedDeviceRegistration();
     }
-
-    loginWindow.focus();
-    return loginWindow;
-  }
-
-  loginWindow = new BrowserWindow({
-    width: 1280,
-    height: 900,
-    minWidth: 960,
-    minHeight: 700,
-    title: launchState.flow === "fbr" ? "Iris Sign In" : "MyDLD Sign In",
-    backgroundColor: "#ffffff",
-    autoHideMenuBar: true,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      partition,
-    },
-  });
-
-  attachLoginWindowWatchers(loginWindow);
-
-  loginWindow.on("closed", () => {
-    loginWindow = null;
-    clearAutoCaptureTimer();
-
-    if (!autoCaptureState.completed && !autoCaptureState.inProgress) {
-      pushStatus(
-        "idle",
-        launchState.flow === "fbr"
-          ? "Iris sign-in window closed. Start the connection again if needed."
-          : "MyDLD sign-in window closed. Start the connection again if needed.",
-      );
+    const partition = getWorkerPartition();
+    const loginUrl = resolveDesktopLoginUrl();
+    let windowInstance =
+      loginWindow && !loginWindow.isDestroyed() ? loginWindow : null;
+    if (windowInstance && windowInstance.taxRocketPartition !== partition) {
+      // Never reuse one user's browser profile for a different launch partition.
+      windowInstance.close();
+      windowInstance = null;
     }
-  });
-
-  loginWindow.loadURL(resolveDesktopLoginUrl());
-  pushStatus(
-    "progress",
-    launchState.flow === "fbr"
-      ? "Iris sign-in opened. Complete the local sign-in and we will continue automatically."
-      : "MyDLD sign-in opened. Complete the official sign-in and we will continue automatically.",
-  );
-  return loginWindow;
+    if (!windowInstance) {
+      windowInstance = new BrowserWindow({
+        width: 1280,
+        height: 900,
+        minWidth: 960,
+        minHeight: 700,
+        title: `IRIS — Navigation-only pilot [${AGENT_BUILD_TAG}]`,
+        backgroundColor: "#ffffff",
+        autoHideMenuBar: true,
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          partition,
+        },
+      });
+      windowInstance.taxRocketPartition = partition;
+      loginWindow = windowInstance;
+      attachLoginWindowWatchers(windowInstance);
+      await windowInstance.loadURL(loginUrl);
+    } else {
+      loginWindow = windowInstance;
+      const currentUrl = windowInstance.webContents.getURL();
+      const retainLivePage =
+        launchState.flow === "fbr" &&
+        !launchState.desktopAuthConfig.useMockIris &&
+        irisNavigation.isAllowedPortalUrl(currentUrl);
+      if (
+        !retainLivePage &&
+        (openFresh || !currentUrl || currentUrl === "about:blank")
+      ) {
+        await windowInstance.loadURL(loginUrl);
+      }
+    }
+    windowInstance.show();
+    windowInstance.focus();
+    scheduleAutoCapture("login-detected");
+    startLocalWorkerLoop();
+    return windowInstance;
+  })();
+  try {
+    return await loginWindowPromise;
+  } finally {
+    loginWindowPromise = null;
+  }
 }
 
 async function captureLoginWindowState() {
@@ -4362,6 +5289,16 @@ async function captureLoginWindowState() {
   const desktopAuthConfig = normalizeDesktopAuthConfig(
     launchState.desktopAuthConfig,
   );
+
+  if (launchState.flow === "fbr" && !desktopAuthConfig.useMockIris) {
+    const inspection = await irisNavigation.probeFrames(loginWindow);
+    if (!irisNavigation.isAuthenticated(inspection)) {
+      throw new Error(
+        "IRIS authenticated dashboard has not been detected. Complete sign-in locally.",
+      );
+    }
+    return { capturedUrl: currentUrl };
+  }
 
   if (
     desktopAuthConfig.readyRejectSelector &&
@@ -4434,7 +5371,31 @@ async function markTrustedDeviceReady() {
   return result;
 }
 
-ipcMain.handle("get-launch-state", async () => launchState);
+ipcMain.handle("get-launch-state", async () => ({
+  ...launchState,
+  agentBuild: getAgentBuildLabel(),
+}));
+
+ipcMain.handle("export-iris-inspection", async (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents)
+    throw new Error("Untrusted IPC sender.");
+  const windowInstance = getLivePortalWindow();
+  if (!windowInstance || windowInstance.isDestroyed())
+    throw new Error("Open the IRIS window first.");
+  const inspection = await irisNavigation.probeFrames(windowInstance, {
+    ...lastNavigationOptions,
+    taxpayerIdentifier: launchState.accountReference || "",
+  });
+  const filePath = writePortalInspectionToDisk({
+    ...inspection,
+    ...(lastSectionTour ? { sectionTour: lastSectionTour } : {}),
+  });
+  pushStatus(
+    "success",
+    `Read-only structure exported: ${filePath}. Review the file before sharing.`,
+  );
+  return { ok: true, filePath };
+});
 
 ipcMain.handle("open-portal-login", async () => {
   await createLoginWindow(true);
@@ -4458,7 +5419,20 @@ ipcMain.handle("capture-and-upload", async (_event, input = {}) => {
 });
 
 ipcMain.handle("set-account-reference", async (_event, value) => {
-  launchState.accountReference = typeof value === "string" ? value.trim() : "";
+  if (typeof value !== "string" || !/^[0-9 -]{0,24}$/.test(value)) {
+    throw new Error(
+      "Enter only the taxpayer CNIC/NTN digits and separators, not passwords or other text.",
+    );
+  }
+  if (
+    String(launchState.accountReference || "").replace(/[ -]/g, "") !==
+    value.replace(/[ -]/g, "")
+  ) {
+    navigationStates.clear();
+    lastSectionTour = null;
+    lastTourStateKey = null;
+  }
+  launchState.accountReference = value.trim();
   publishLaunchState();
   return { ok: true };
 });

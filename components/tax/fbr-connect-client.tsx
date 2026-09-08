@@ -65,10 +65,30 @@ type DeviceView = {
   createdAt: string | Date;
 };
 
-type Phase = "connect" | "start" | "working" | "resume" | "done";
+type Phase = "connect" | "connecting" | "start" | "working" | "resume" | "done";
 type FlowStep = "connect" | "start" | "resume";
 
 const PAUSE_LABELS: Record<string, string> = {
+  portal_inspection: "Identify the IRIS return form",
+  portal_readiness_unverified: "Waiting for a recognizable IRIS screen",
+  portal_identity_required: "Enter the target taxpayer in the desktop agent",
+  portal_taxpayer_mismatch: "Taxpayer verification needs attention",
+  portal_document_mismatch: "Form / tax year / period needs attention",
+  portal_draft_ambiguous: "Select the intended draft",
+  portal_draft_list_incomplete: "Check the full draft list",
+  portal_new_return_setup: "New-return setup is open",
+  portal_sections_inspected: "Return sections inspected — no submission",
+  portal_section_navigation: "Section navigation needs attention",
+  portal_section_capture: "Waiting for the current section's field structure",
+  portal_identity_changed: "Taxpayer target changed — recheck required",
+  portal_job_check_unavailable: "Check the web-app connection",
+  portal_fields_verified: "Return opened — Salary structure verified",
+  portal_fields_unverified: "Review the opened form structure",
+  portal_navigation: "Navigation needs attention",
+  portal_unsupported_route: "Return route not supported by this pilot",
+  portal_popup: "IRIS dialog needs attention",
+  session_reconnect: "Complete IRIS sign-in",
+  selector_bundle_update: "Retry the current navigation step",
   password_reset: "Password reset",
   otp_captcha_pin: "OTP / CAPTCHA / PIN",
   otp_required: "OTP",
@@ -93,15 +113,15 @@ const ACTIVE_JOB_STATUSES = new Set([
 // while that heartbeat is fresh; otherwise closing the agent left the flow
 // stuck on "Start filing" with no way back to Step 1 to reconnect.
 const AGENT_HEARTBEAT_FRESH_MS = 45_000;
-// A just-created session keeps Step 2 visible while the deep link is still
-// launching the agent (session expiry is creation time + 10 minutes).
+// A just-created session shows a WAITING phase, never an authenticated-ready
+// state (session expiry is creation time + 10 minutes).
 const SESSION_GRACE_MS = 2 * 60_000;
 const SESSION_TTL_MS = 10 * 60_000;
 
 const FLOW_STEPS: ReadonlyArray<{ id: FlowStep; n: string; label: string }> = [
   { id: "connect", n: "1", label: "Open agent" },
-  { id: "start", n: "2", label: "Start filing" },
-  { id: "resume", n: "3", label: "Confirm on screen" },
+  { id: "start", n: "2", label: "Check IRIS" },
+  { id: "resume", n: "3", label: "Review checkpoint" },
 ];
 
 const FLOW_ORDER: FlowStep[] = ["connect", "start", "resume"];
@@ -112,7 +132,7 @@ function formatWhen(value: string | Date | null | undefined) {
 }
 
 function flowStepForPhase(phase: Phase): FlowStep {
-  if (phase === "connect") return "connect";
+  if (phase === "connect" || phase === "connecting") return "connect";
   if (phase === "start" || phase === "working") return "start";
   return "resume";
 }
@@ -216,6 +236,7 @@ export default function FbrConnectClient({
     if (!draftId) return;
     setSessionLoading(true);
     setError(null);
+    setDevices([]);
     try {
       await startFbrConnectionAction(draftId);
       const res = await fetch("/api/fbr-connect/desktop/session", {
@@ -228,20 +249,9 @@ export default function FbrConnectClient({
         setError(data.error || "Could not start the desktop agent");
       } else {
         setSession(data.session);
-        try {
-          await fetch(data.session.localhostUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              flow: "fbr",
-              token: data.session.launchToken,
-              partitionKey: data.session.partitionKey,
-              apiBaseUrl: window.location.origin,
-            }),
-          });
-        } catch {
-          // Installed app opens via deep link.
-        }
+        // Use ONE transport. The old POST did not meet the bridge's nonce/
+        // allowlist contract and also triggered the protocol unconditionally.
+        // The installed/dev agent registers this Windows protocol on startup.
         window.location.href = data.session.deepLink;
       }
     } catch {
@@ -296,6 +306,11 @@ export default function FbrConnectClient({
     .filter(
       (d) =>
         d.status === "ACTIVE" &&
+        d.localFbrConnectedAt &&
+        (!session ||
+          (d.partitionKey === session.partitionKey &&
+            new Date(d.localFbrConnectedAt).getTime() >=
+              new Date(session.expiresAt).getTime() - SESSION_TTL_MS)) &&
         d.lastSeenAt &&
         Date.now() - new Date(d.lastSeenAt).getTime() <
           AGENT_HEARTBEAT_FRESH_MS,
@@ -309,7 +324,7 @@ export default function FbrConnectClient({
     Boolean(session) &&
     Date.now() - (new Date(session!.expiresAt).getTime() - SESSION_TTL_MS) <
       SESSION_GRACE_MS;
-  const agentReady = Boolean(readyDevice || sessionFresh);
+  const agentReady = Boolean(readyDevice);
   const activeJob = jobs.find((j) => ACTIVE_JOB_STATUSES.has(j.status));
   const completedFiling = jobs.find(
     (j) => j.jobType !== "tax_dry_run" && j.status === "completed",
@@ -320,7 +335,33 @@ export default function FbrConnectClient({
   else if (activeJob) phase = "working";
   else if (completedFiling && agentReady && !startOver) phase = "done";
   else if (agentReady) phase = "start";
+  else if (sessionFresh || sessionLoading) phase = "connecting";
 
+  const inspectionPause = Boolean(
+    activeJob?.pauseAction &&
+    [
+      "portal_inspection",
+      "portal_popup",
+      "selector_bundle_update",
+      "session_reconnect",
+      "portal_readiness_unverified",
+      "portal_identity_required",
+      "portal_taxpayer_mismatch",
+      "portal_document_mismatch",
+      "portal_draft_ambiguous",
+      "portal_draft_list_incomplete",
+      "portal_new_return_setup",
+      "portal_fields_verified",
+      "portal_fields_unverified",
+      "portal_navigation",
+      "portal_unsupported_route",
+      "portal_sections_inspected",
+      "portal_section_navigation",
+      "portal_section_capture",
+      "portal_identity_changed",
+      "portal_job_check_unavailable",
+    ].includes(activeJob.pauseAction),
+  );
   const activeFlowStep = flowStepForPhase(phase);
   const activeIndex = FLOW_ORDER.indexOf(activeFlowStep);
 
@@ -400,24 +441,53 @@ export default function FbrConnectClient({
         </Card>
       )}
 
+      {phase === "connecting" && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Loader2 className="h-4 w-4 animate-spin" /> Waiting for IRIS
+              sign-in
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p>
+              Finish login in the desktop agent and keep that portal window
+              open. Creating a launch link alone does not mean IRIS is
+              connected.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={sessionLoading}
+              onClick={handleCreateSession}
+            >
+              Agent did not open? Try again
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {phase === "start" && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <ShieldCheck className="h-4 w-4" /> Step 2 — Start filing
+              <ShieldCheck className="h-4 w-4" /> Step 2 — Check IRIS navigation
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p className="text-muted-foreground">
               Agent is ready
               {readyDevice?.deviceName ? ` on ${readyDevice.deviceName}` : ""}.
-              This fills your return in IRIS and pauses when a password reset,
-              OTP, PIN, or payment is needed.
+              Enter the target CNIC/NTN in the desktop agent first. The pilot
+              opens a matching original 114(1) draft, or the new-return menu if
+              none exists in the complete list. It inspects the supplied Data
+              sections plus Payment and Attachment structures. It does not enter
+              amounts, upload files, pay, save or submit.
             </p>
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
-                disabled={!draftId || !!actionLoading}
+                disabled={!draftId || !readyDevice || !!actionLoading}
                 onClick={handleStartFiling}
                 className="gap-2"
               >
@@ -426,7 +496,7 @@ export default function FbrConnectClient({
                 ) : (
                   <Play className="h-3.5 w-3.5" />
                 )}
-                Start filing
+                Start navigation check
               </Button>
               <Button
                 variant="outline"
@@ -456,14 +526,17 @@ export default function FbrConnectClient({
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <Loader2 className="h-4 w-4 animate-spin" /> Filing in progress
+              <Loader2 className="h-4 w-4 animate-spin" /> Desktop check in
+              progress
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p className="text-muted-foreground">
-              Look at the Tax Rocket Portal Agent window. Do not start another
-              filing. If a password, OTP, PIN, or payment appears, complete it
-              there — this page will then ask you to continue.
+              Look at the Tax Rocket Portal Agent window. The live navigation
+              pilot checks Draft / IT Declaration, opens the matching return and
+              verifies fields. If no draft exists, it opens the new-return menu
+              and pauses for setup. Complete sign-in or close a welcome popup
+              locally if asked. Do not start another job.
             </p>
             <p className="text-xs text-muted-foreground">
               Assisted filing · started {formatWhen(activeJob.createdAt)}
@@ -603,7 +676,13 @@ export default function FbrConnectClient({
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
-                Finish that step in the agent window, then press Continue here.
+                Checkpoint: {activeJob.pauseAction || "unknown"} · Job:{" "}
+                {activeJob.id.slice(-8)}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {inspectionPause
+                  ? "Follow the checkpoint above in the desktop agent. Retry resumes the pending section after checking the current document. Export IRIS structure includes the sections already captured. No financial filling or submission is enabled."
+                  : "Finish that step in the agent window, then press Continue here."}
               </p>
               <Button
                 size="sm"
@@ -616,8 +695,26 @@ export default function FbrConnectClient({
                 ) : (
                   <ExternalLink className="h-3.5 w-3.5" />
                 )}
-                Continue
+                {inspectionPause ? "Retry navigation check" : "Continue"}
               </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={actionLoading === activeJob.id}
+                onClick={() => handleCancelJob(activeJob.id)}
+              >
+                Cancel this job
+              </Button>
+              {inspectionPause && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={sessionLoading}
+                  onClick={handleCreateSession}
+                >
+                  Reopen existing IRIS window
+                </Button>
+              )}
             </CardContent>
           </Card>
         )}

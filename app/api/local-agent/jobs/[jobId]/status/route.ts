@@ -6,6 +6,62 @@ import {
   normalizePauseAction,
 } from "@/lib/tax/fbr-desktop";
 
+/** Read-only liveness/cancellation check used before desktop navigation steps. */
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ jobId: string }> },
+) {
+  try {
+    const { jobId } = await params;
+    const header = req.headers.get("authorization") || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    if (!token)
+      return NextResponse.json(
+        { success: false, ok: false, error: "Bearer device token required" },
+        { status: 401 },
+      );
+    const device = await prisma.trustedDevice.findUnique({
+      where: { deviceTokenHash: hashToken(token) },
+    });
+    if (!device || device.status !== "ACTIVE") {
+      return NextResponse.json(
+        { success: false, ok: false, error: "Invalid device" },
+        { status: 401 },
+      );
+    }
+    const job = await prisma.localAgentJob.findFirst({
+      where: { id: jobId, userId: device.userId, trustedDeviceId: device.id },
+      select: { id: true, status: true, expiresAt: true },
+    });
+    if (!job)
+      return NextResponse.json(
+        { success: false, ok: false, error: "Job not found for this device" },
+        { status: 404 },
+      );
+    return NextResponse.json(
+      {
+        success: true,
+        ok: true,
+        job: {
+          id: job.id,
+          status: job.status,
+          expired: Boolean(
+            job.expiresAt && job.expiresAt.getTime() <= Date.now(),
+          ),
+          expiresAt: job.expiresAt?.toISOString() || null,
+        },
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch (error) {
+    console.error("Error checking desktop job state:", error);
+    return NextResponse.json(
+      { success: false, ok: false, error: "Job state unavailable" },
+      { status: 500 },
+    );
+  }
+}
+
 /**
  * POST /api/local-agent/jobs/[jobId]/status
  * Electron agent reports job status updates
@@ -36,8 +92,10 @@ export async function POST(
       pauseMessage,
       result,
       error,
+      errorMessage,
       screenshots,
       logs,
+      executionLog,
       resumeData,
     } = body as any;
 
@@ -82,6 +140,27 @@ export async function POST(
       return NextResponse.json(
         { success: false, error: "Job not found" },
         { status: 404 },
+      );
+    }
+
+    // A late worker response must not resurrect a cancelled/expired job.
+    if (
+      [
+        JOB_STATUSES.CANCELLED,
+        JOB_STATUSES.COMPLETED,
+        JOB_STATUSES.FAILED,
+        JOB_STATUSES.EXPIRED,
+      ].includes(job.status as any)
+    ) {
+      return NextResponse.json(
+        { success: false, error: `Job is already ${job.status}` },
+        { status: 409 },
+      );
+    }
+    if (job.trustedDeviceId && job.trustedDeviceId !== device.id) {
+      return NextResponse.json(
+        { success: false, error: "Job belongs to a different device" },
+        { status: 403 },
       );
     }
 
@@ -131,9 +210,12 @@ export async function POST(
         typeof result === "string" ? result : JSON.stringify(result);
     }
 
-    if (error) {
+    const reportedError = errorMessage ?? error;
+    if (reportedError) {
       updateData.errorMessage =
-        typeof error === "string" ? error : JSON.stringify(error);
+        typeof reportedError === "string"
+          ? reportedError
+          : JSON.stringify(reportedError);
     }
 
     if (screenshots) {
@@ -143,9 +225,12 @@ export async function POST(
           : JSON.stringify(screenshots);
     }
 
-    if (logs) {
+    const reportedLogs = executionLog ?? logs;
+    if (reportedLogs) {
       updateData.logsJson =
-        typeof logs === "string" ? logs : JSON.stringify(logs);
+        typeof reportedLogs === "string"
+          ? reportedLogs
+          : JSON.stringify(reportedLogs);
     }
 
     if (resumeData) {
@@ -158,7 +243,8 @@ export async function POST(
     if (
       status === JOB_STATUSES.COMPLETED ||
       status === JOB_STATUSES.FAILED ||
-      status === JOB_STATUSES.CANCELLED
+      status === JOB_STATUSES.CANCELLED ||
+      status === JOB_STATUSES.EXPIRED
     ) {
       updateData.completedAt = new Date();
     }
@@ -167,9 +253,31 @@ export async function POST(
       updateData.startedAt = new Date();
     }
 
-    const updatedJob = await prisma.localAgentJob.update({
-      where: { id: jobId },
+    const changed = await prisma.localAgentJob.updateMany({
+      where: {
+        id: jobId,
+        status: {
+          notIn: [
+            JOB_STATUSES.CANCELLED,
+            JOB_STATUSES.COMPLETED,
+            JOB_STATUSES.FAILED,
+            JOB_STATUSES.EXPIRED,
+          ],
+        },
+      },
       data: updateData,
+    });
+    if (changed.count !== 1) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Job was closed while the agent was reporting status",
+        },
+        { status: 409 },
+      );
+    }
+    const updatedJob = await prisma.localAgentJob.findUniqueOrThrow({
+      where: { id: jobId },
     });
 
     // If job completed, update FbrConnection as well
@@ -218,7 +326,7 @@ export async function POST(
           jobType: job.jobType,
           pauseAction: updateData.pauseAction,
           hasResult: !!result,
-          hasError: !!error,
+          hasError: !!reportedError,
         }),
       },
     });

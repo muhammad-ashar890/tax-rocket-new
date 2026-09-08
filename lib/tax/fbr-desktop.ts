@@ -1,12 +1,18 @@
 import { createHash, randomBytes } from "crypto";
+import { getFbrDesktopAuthConfig } from "./fbr-agent-config";
 
 export function generateLaunchToken(): string {
   return randomBytes(32).toString("hex"); // 64 chars
 }
 
 export function generatePartitionKey(userId: string): string {
-  const suffix = randomBytes(4).toString("hex");
-  return `fbr-iris-${userId.slice(0, 8)}-${suffix}`;
+  // Per-user STABLE partition key. The Electron partition is the browser
+  // profile that holds the IRIS login session (cookies), so it must stay the
+  // same across sessions — a random suffix here silently logged the user out
+  // of the agent window on every reconnect. Same user => same partition =>
+  // the IRIS login survives between "Open agent" clicks and job runs.
+  const hash = createHash("sha256").update(userId).digest("hex").slice(0, 16);
+  return `fbr-iris-${hash}`;
 }
 
 export function hashToken(token: string): string {
@@ -36,30 +42,31 @@ export function buildDesktopSessionConfig(params: {
 }): DesktopSessionConfig {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min
   const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
-  // Real IRIS root opens the Taxpayer login screen directly; there is no
-  // /login route on iris.fbr.gov.pk.
-  const irisLoginUrl =
-    process.env.FBR_IRIS_LOGIN_URL?.trim() || "https://iris.fbr.gov.pk/";
-  const irisReadySelector =
-    process.env.FBR_IRIS_READY_SELECTOR?.trim() || "body";
-  const readyUrlPattern =
-    process.env.FBR_IRIS_READY_URL_PATTERN?.trim() || "iris.fbr.gov.pk";
-
-  // The desktop agent reads loginUrl/readySelector/readyUrlPattern from the
-  // connect URL's query string (main.js resolveDesktopLoginUrl). If they are
-  // missing, it falls back to the local mock-iris fixture — so every
-  // handoff URL below must carry them explicitly.
-  const authParams =
-    `&loginUrl=${encodeURIComponent(irisLoginUrl)}` +
-    `&readySelector=${encodeURIComponent(irisReadySelector)}` +
-    `&readyUrlPattern=${encodeURIComponent(readyUrlPattern)}`;
+  const auth = getFbrDesktopAuthConfig();
+  const irisLoginUrl = auth.loginUrl;
+  const irisReadySelector = auth.readySelector;
+  const readyUrlPattern = auth.readyUrlPattern || "";
+  const query = new URLSearchParams({
+    token: params.launchToken,
+    partition: params.partitionKey,
+    apiBaseUrl: baseUrl,
+    baseUrl,
+    flow: "fbr",
+    loginUrl: irisLoginUrl,
+    readySelector: irisReadySelector,
+    readyUrlPattern,
+    rejectSelector: auth.readyRejectSelector || "",
+    useMockIris: String(auth.useMockIris),
+  });
 
   return {
     launchToken: params.launchToken,
     partitionKey: params.partitionKey,
     deviceTokenHash: params.deviceTokenHash,
-    deepLink: `taxrocket-connect://connect?token=${params.launchToken}&partition=${params.partitionKey}&apiBaseUrl=${encodeURIComponent(baseUrl)}&baseUrl=${encodeURIComponent(baseUrl)}&flow=fbr${authParams}`,
-    localhostUrl: `http://127.0.0.1:37219/connect?token=${params.launchToken}&partition=${params.partitionKey}&apiBaseUrl=${encodeURIComponent(baseUrl)}&flow=fbr${authParams}`,
+    deepLink: `taxrocket-connect://connect?${query}`,
+    // Bridge requires a nonce/allowlist/confirmation handshake; the web UI
+    // intentionally uses the registered protocol only, never both transports.
+    localhostUrl: "http://127.0.0.1:37219/connect",
     expiresAt,
     irisLoginUrl,
     irisReadySelector,
@@ -85,6 +92,10 @@ export const JOB_STATUSES = {
 } as const;
 
 export const PAUSE_ACTIONS = {
+  PORTAL_INSPECTION: "portal_inspection",
+  PORTAL_POPUP: "portal_popup",
+  SESSION_RECONNECT: "session_reconnect",
+  SELECTOR_BUNDLE_UPDATE: "selector_bundle_update",
   PASSWORD_RESET: "password_reset",
   OTP: "otp_required",
   OTP_CAPTCHA_PIN: "otp_captcha_pin",

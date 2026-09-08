@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 const agentApi = {
   getLaunchState: () => ipcRenderer.invoke("get-launch-state"),
+  exportIrisInspection: () => ipcRenderer.invoke("export-iris-inspection"),
   openPortalLogin: () => ipcRenderer.invoke("open-portal-login"),
   captureAndUpload: (input) => ipcRenderer.invoke("capture-and-upload", input),
   setAccountReference: (value) =>

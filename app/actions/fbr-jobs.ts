@@ -4,6 +4,7 @@ import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createNotification } from "@/app/actions/notifications";
+import { getNextFbrPilotPhase } from "@/lib/tax/fbr-job-resume";
 import { JOB_STATUSES, JOB_TYPES } from "@/lib/tax/fbr-desktop";
 
 async function getOwnedDraft(draftId: string) {
@@ -388,41 +389,10 @@ export async function resumeJobAfterPauseAction(
       };
     }
 
-    // Map action to next phase (same as old reference)
-    function getNextPhase(action: string, curPhase: string): string {
-      const a = action.toLowerCase();
-      if (a.includes("password_reset")) return "after_password_reset";
-      if (
-        a.includes("otp") ||
-        a.includes("captcha") ||
-        (a.includes("pin") && !a.includes("classic"))
-      )
-        return "after_otp_captcha_pin";
-      if (a.includes("payment") || a.includes("psid"))
-        return "after_payment_psid";
-      if (
-        a.includes("final_review") ||
-        a.includes("final_submit") ||
-        a.includes("classic_final")
-      )
-        return "after_final_submit_confirmation";
-      if (a.includes("classic_pin")) return "after_classic_pin_entry";
-      // fallback progression
-      const order = [
-        "start",
-        "after_password_reset",
-        "after_otp_captcha_pin",
-        "after_payment_psid",
-        "after_final_submit_confirmation",
-        "completed",
-      ];
-      const idx = order.indexOf(curPhase);
-      return idx >= 0 && idx < order.length - 1
-        ? order[idx + 1]
-        : "after_password_reset";
-    }
-
-    const nextPhase = getNextPhase(requiredAction || pauseAction, currentPhase);
+    const nextPhase = getNextFbrPilotPhase(
+      requiredAction || pauseAction,
+      currentPhase,
+    );
 
     const existingConfirmations = Array.isArray(
       payload?.livePilotState?.confirmations,

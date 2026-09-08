@@ -63,19 +63,28 @@ export type FbrDesktopAuthConfig = {
 
 export function getFbrDesktopAuthConfig(): FbrDesktopAuthConfig {
   const useMockIris =
-    (process.env.FBR_USE_MOCK_IRIS?.trim() || "true").toLowerCase() !== "false";
+    (process.env.FBR_USE_MOCK_IRIS?.trim() || "false").toLowerCase() === "true";
   const loginUrl =
     process.env.FBR_IRIS_LOGIN_URL?.trim() ||
     // Real IRIS root opens the Taxpayer login screen directly.
     (useMockIris ? "mock-iris://login" : "https://iris.fbr.gov.pk/");
 
+  if (useMockIris !== loginUrl.startsWith("mock-iris://")) {
+    throw new Error(
+      "FBR_USE_MOCK_IRIS and FBR_IRIS_LOGIN_URL disagree. Explicitly choose one environment.",
+    );
+  }
+  if (!useMockIris && !loginUrl.startsWith("https://")) {
+    throw new Error("Real IRIS requires an HTTPS login URL.");
+  }
   return {
     loginUrl,
     readySelector:
-      process.env.FBR_IRIS_READY_SELECTOR?.trim() || "#iris-dashboard-ready",
+      process.env.FBR_IRIS_READY_SELECTOR?.trim() ||
+      (useMockIris ? "#iris-dashboard-ready" : "#homeLink"),
     readyRejectSelector:
       process.env.FBR_IRIS_READY_REJECT_SELECTOR?.trim() ||
-      "#iris-password-reset-required",
+      (useMockIris ? "#iris-password-reset-required" : null),
     readyUrlPattern:
       process.env.FBR_IRIS_READY_URL_PATTERN?.trim() || "/dashboard",
     useMockIris,
@@ -112,6 +121,10 @@ export type FbrSelectorBundleSummary = {
 };
 
 export type FbrPortalAutomationConfig = {
+  livePilot: {
+    mode: "navigation_inspection_only";
+    automaticFilingEnabled: false;
+  };
   portalHostAllowlist: string[];
   readiness: {
     loginUrl: string;
@@ -240,6 +253,18 @@ export const DEFAULT_SELECTOR_BUNDLE = {
   } as Record<IrisRouteFamily, FbrRouteSelectorConfig>,
 };
 
+// Only explicit, approved packet route metadata can select a return family.
+// `filerType` describes the app profile, not a legal IRIS form. Do not infer it.
+export function resolveIrisRouteFamily(value: unknown): IrisRouteFamily | null {
+  return typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(
+      DEFAULT_SELECTOR_BUNDLE.routeSelectors,
+      value,
+    )
+    ? (value as IrisRouteFamily)
+    : null;
+}
+
 // ─── Automation Config Builder ───────────────────────────────────
 
 function splitHosts(value: string | undefined) {
@@ -274,6 +299,10 @@ export async function getFbrPortalAutomationConfig(input?: {
       : null;
 
   return {
+    livePilot: {
+      mode: "navigation_inspection_only",
+      automaticFilingEnabled: false,
+    },
     portalHostAllowlist: allowlist,
     readiness: {
       loginUrl: desktop.loginUrl,

@@ -23,6 +23,7 @@
     "asar": true,
     "files": [
       "main.js",
+      "iris-navigation.js",
       "preload.js",
       "portal-agent.js",
       "renderer.html",

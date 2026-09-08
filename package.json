@@ -30,7 +30,8 @@
     "verify:ui-security": "node scripts/ui/verify-ui-04-security.cjs",
     "verify:ui": "npm run verify:ui-auth && npm run verify:ui-wizard && npm run verify:ui-calculation && npm run verify:ui-security",
     "check:oauth": "node scripts/check-oauth-callback.cjs",
-    "diagnose:withholding": "node scripts/diagnose-withholding.cjs"
+    "diagnose:withholding": "node scripts/diagnose-withholding.cjs",
+    "verify:iris-navigation": "node --test scripts/verify-iris-navigation.cjs scripts/verify-fbr-contracts.cjs"
   },
   "dependencies": {
     "@e965/xlsx": "^0.20.3",
