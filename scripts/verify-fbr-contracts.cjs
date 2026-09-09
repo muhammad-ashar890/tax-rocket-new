@@ -534,3 +534,78 @@ test("packaged Windows agent includes the new module and frontend uses one trans
   assert.ok(ui.includes("const agentReady = Boolean(readyDevice)"));
   assert.ok(ui.includes("d.localFbrConnectedAt"));
 });
+
+// ── Phase 1: real-portal autofill wiring ──
+
+test("real-portal autofill module is packaged into the Windows installer", () => {
+  const agentPackage = JSON.parse(
+    fs.readFileSync(path.join(root, "electron-connect/package.json"), "utf8"),
+  );
+  assert.ok(
+    agentPackage.build.files.includes("iris-row-filler.js"),
+    "iris-row-filler.js must ship with the agent or real autofill is dead code on installed clients",
+  );
+});
+
+test("real IRIS mode no longer dead-ends at navigation-only inspection", () => {
+  const main = fs.readFileSync(
+    path.join(root, "electron-connect/main.js"),
+    "utf8",
+  );
+
+  // The old shape returned the navigation check immediately, so packet values
+  // could never reach the live portal.
+  assert.ok(
+    !/if \(realPortalMode\) \{\s*return runLocalIrisNavigationCheck\(/.test(
+      main,
+    ),
+    "real mode must not unconditionally return the navigation check",
+  );
+
+  assert.ok(main.includes("function runRealIrisAutofill("));
+  assert.ok(main.includes('require("./iris-row-filler")'));
+
+  // Both job types must route through it.
+  const dryRun = main.slice(
+    main.indexOf("async function runLocalTaxDryRunFlow("),
+  );
+  assert.ok(dryRun.slice(0, 1400).includes("runRealIrisAutofill"));
+  const assisted = main.slice(
+    main.indexOf("async function runLocalTaxAssistedFilingFlow("),
+  );
+  assert.ok(assisted.slice(0, 1400).includes("runRealIrisAutofill"));
+});
+
+test("real autofill stays opt-in and honours a dry-run mode", () => {
+  const main = fs.readFileSync(
+    path.join(root, "electron-connect/main.js"),
+    "utf8",
+  );
+  assert.ok(main.includes("TAXROCKET_REAL_AUTOFILL"));
+  assert.ok(main.includes("function getRealAutofillMode("));
+
+  // Unset env must preserve the previous behaviour.
+  assert.ok(
+    /return "off";/.test(main),
+    "an unrecognised/unset flag must fall back to navigation-only",
+  );
+  assert.ok(
+    main.includes('autofillMode === "off"'),
+    "the off mode must short-circuit before any writing happens",
+  );
+  assert.ok(
+    main.includes("navigation?.paused"),
+    "a paused navigation checkpoint must not be overridden by autofill",
+  );
+});
+
+test("packet field map carries the IRIS code the filler addresses rows by", () => {
+  const mapSource = fs.readFileSync(
+    path.join(root, "lib/tax/portal-field-map.ts"),
+    "utf8",
+  );
+  // The filler resolves a row as document row id === irisCode, so the flattened
+  // worker payload must expose irisCode and the column name.
+  assert.ok(mapSource.includes("irisCode: entry.irisCode"));
+  assert.ok(mapSource.includes("column: entry.column"));
+});

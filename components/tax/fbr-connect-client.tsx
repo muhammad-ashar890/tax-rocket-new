@@ -87,6 +87,8 @@ const PAUSE_LABELS: Record<string, string> = {
   portal_navigation: "Navigation needs attention",
   portal_unsupported_route: "Return route not supported by this pilot",
   portal_popup: "IRIS dialog needs attention",
+  portal_economic_transactions_gate:
+    "Answer the IRIS income-sources and residency questions",
   session_reconnect: "Complete IRIS sign-in",
   selector_bundle_update: "Retry the current navigation step",
   password_reset: "Password reset",
@@ -342,6 +344,7 @@ export default function FbrConnectClient({
     [
       "portal_inspection",
       "portal_popup",
+      "portal_economic_transactions_gate",
       "selector_bundle_update",
       "session_reconnect",
       "portal_readiness_unverified",

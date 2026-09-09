@@ -48,6 +48,20 @@ const ALL_SECTION_TOUR = Object.freeze([
 const ALL_SECTION_IDS = Object.freeze(
   ALL_SECTION_TOUR.map((section) => section.id),
 );
+// The 116 Wealth Statement sections are NOT panels inside the 114(1) workflow.
+// Dry-run 2026-09-09 captured only two expansion panels on the opened return --
+// "Employment" and "Tax Chargeable / Payments" -- so both wealth profiles report
+// panelFound:false and the tour correctly refuses to guess, blocking every later
+// section. Assets/Reconciliation live in a separate document (form 116, reached
+// via the "Assets Declaration" menu) and are tracked as their own phase. This
+// plan covers the income/tax views that autofill actually needs.
+const WEALTH_SECTION_IDS = Object.freeze([
+  "wealth_assets",
+  "wealth_reconciliation",
+]);
+const INCOME_SECTION_IDS = Object.freeze(
+  ALL_SECTION_IDS.filter((id) => !WEALTH_SECTION_IDS.includes(id)),
+);
 
 function normalizeSetupLabel(value) {
   return String(value || "")
@@ -101,12 +115,90 @@ function isRecognizedNewReturnSetup(input = {}) {
   return Boolean(classifyNewReturnSetupStage(input));
 }
 
+// Phase 1.5b. The blue dashboard tile lands on
+// /nitr/summary-economic-transactions: a pre-filing gate that asks for income
+// sources and residency before "Start Return Filling" becomes enabled. The
+// agent must NEVER answer it (residency is a legal determination under ITO
+// s.82-84 and the source ticks decide which schedules IRIS opens). It only
+// recognises the gate and tells the operator exactly what is outstanding.
+function describeEconomicTransactionsGate(gate) {
+  if (!gate || !gate.present) return null;
+  const sources = Array.isArray(gate.sources) ? gate.sources : [];
+  const selected = sources.filter((source) => source && source.checked);
+  const missing = [];
+  if (!selected.length) missing.push("income sources");
+  if (!gate.residencySelected) missing.push("tax residency");
+  return {
+    ready: Boolean(gate.startEnabled),
+    selectedSources: selected.map((source) => source.label).filter(Boolean),
+    availableSources: sources.map((source) => source.label).filter(Boolean),
+    residencySelected: Boolean(gate.residencySelected),
+    startPresent: Boolean(gate.startPresent),
+    startEnabled: Boolean(gate.startEnabled),
+    missing,
+  };
+}
+
 function isSafeAutoAdvanceNewReturnStage(stage) {
   return ["menu", "return_type", "period", "accept_continue"].includes(stage);
 }
 
 function isManualNewReturnStage(stage) {
   return stage === "residency";
+}
+
+// Phase 2a. Dry-run 2026-09-09 filled 0/27: the section tour leaves the portal
+// on its LAST view (Attachment, which has no data rows), and the row filler only
+// ever sees the section currently on screen. Codes that genuinely exist and are
+// editable -- 1000 and 1009 on Salary -- were reported row_not_found purely
+// because the wrong grid was showing.
+//
+// These helpers turn a completed section tour into a per-section fill plan, so
+// the agent can return to the section that owns each code before filling it.
+// Pure functions over already-captured metadata: they read no live DOM and make
+// no navigation decision of their own.
+
+/** Map every IRIS code observed during the tour to the section that showed it. */
+function buildSectionCodeIndex(sectionTour) {
+  const index = new Map();
+  for (const section of sectionTour?.sections || []) {
+    if (!section || !section.id) continue;
+    for (const row of section.rows || []) {
+      const code = String(row?.code || "").trim();
+      if (!code || index.has(code)) continue;
+      index.set(code, section.id);
+    }
+  }
+  return index;
+}
+
+/**
+ * Group packet fields by the section that owns their code, preserving the tour
+ * order so navigation moves forward through the return rather than jumping
+ * about. Codes never seen during the tour are returned separately and are NEVER
+ * guessed into a section.
+ */
+function planSectionFills(fields, sectionTour) {
+  const index = buildSectionCodeIndex(sectionTour);
+  const order = (sectionTour?.sections || [])
+    .map((section) => section?.id)
+    .filter(Boolean);
+  const bySection = new Map();
+  const unlocated = [];
+  for (const field of fields || []) {
+    const code = String(field?.irisCode || "").trim();
+    const sectionId = code ? index.get(code) : null;
+    if (!sectionId) {
+      unlocated.push(field);
+      continue;
+    }
+    if (!bySection.has(sectionId)) bySection.set(sectionId, []);
+    bySection.get(sectionId).push(field);
+  }
+  const groups = order
+    .filter((id) => bySection.has(id))
+    .map((id) => ({ sectionId: id, fields: bySection.get(id) }));
+  return { groups, unlocated };
 }
 
 function isAllowedPortalUrl(value, hosts = DEFAULT_HOSTS) {
@@ -127,6 +219,35 @@ function portalProbe(options = {}) {
     String(s || "")
       .replace(/\s+/g, " ")
       .trim();
+  // In-page mirror of classifyNewReturnSetupStage/isSafeAutoAdvanceNewReturnStage.
+  // Electron serializes this function, so the module-scope originals are not
+  // reachable here. scripts/verify-iris-navigation.cjs asserts the two stay in
+  // agreement so this copy can never silently drift.
+  const setupLabel = (value) =>
+    String(value || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  const classifySetupStage = (input) => {
+    if (input.documentPresent) return null;
+    const prompts = new Set((input.prompts || []).map(setupLabel));
+    const actions = new Set((input.actions || []).map(setupLabel));
+    const nodeLabels = new Set((input.nodeLabels || []).map(setupLabel));
+    if (nodeLabels.has("normal return (ind/aop/coy)")) return "menu";
+    if (prompts.has("normal return") && prompts.has("simplified return"))
+      return "return_type";
+    if (prompts.has("resident") || prompts.has("non-resident"))
+      return "residency";
+    if (actions.has("accept and continue")) return "accept_continue";
+    if (
+      (prompts.has("tax year") || prompts.has("period")) &&
+      actions.has("continue")
+    )
+      return "period";
+    return null;
+  };
+  const isSafeAutoAdvanceStage = (stage) =>
+    ["menu", "return_type", "period", "accept_continue"].includes(stage);
   const attribute = (s) =>
     normalize(s)
       .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[email]")
@@ -455,6 +576,53 @@ function portalProbe(options = {}) {
     (dashboardColumns.includes("action") ||
       dashboardColumns.includes("actions")),
   );
+  // Phase 1.5b. The pre-filing gate reached from the blue dashboard tile.
+  // Presence and enablement ONLY: never read or write the taxpayer's answers.
+  const gateHost = Array.from(
+    document.querySelectorAll("app-summary-economic-transactions"),
+  ).find(visible);
+  const gateStartButton = gateHost
+    ? Array.from(gateHost.querySelectorAll("button")).find(
+        (el) =>
+          visible(el) &&
+          /^start\s+return\s+fill?ing$/i.test(
+            normalize(el.getAttribute("aria-label") || text(el)),
+          ),
+      )
+    : null;
+  const economicTransactionsGate = gateHost
+    ? {
+        present: true,
+        // Path only. The query string carries an opaque session token.
+        path: (() => {
+          try {
+            return new URL(location.href).pathname;
+          } catch {
+            return null;
+          }
+        })(),
+        sources: Array.from(gateHost.querySelectorAll("app-source-checkbox"))
+          .filter(visible)
+          .map((host) => {
+            const input = host.querySelector('input[type="checkbox"]');
+            return {
+              label: text(host).slice(0, 80),
+              checked: Boolean(input && input.checked),
+            };
+          }),
+        residencySelected: Array.from(
+          gateHost.querySelectorAll(
+            'mat-radio-group input[type="radio"], mat-radio-button input[type="radio"]',
+          ),
+        ).some((el) => el.checked),
+        startPresent: Boolean(gateStartButton),
+        startEnabled: Boolean(
+          gateStartButton &&
+          !gateStartButton.disabled &&
+          gateStartButton.getAttribute("aria-disabled") !== "true",
+        ),
+      }
+    : null;
   const workflow = Array.from(
     document.querySelectorAll("app-nitr-workflow"),
   ).find(visible);
@@ -502,10 +670,18 @@ function portalProbe(options = {}) {
     (draftTabs.length > 0 || accountMenu);
   // A hostname/body/search box alone still NEVER proves readiness. Explicit
   // login/expiry prompts override otherwise cached dashboard/return content.
+  // The gate page is served only to a signed-in taxpayer but renders none of
+  // the dashboard chrome (no homeLink, Declaration menu, person_pin or
+  // #dashboardTable). Without this it would be reported as unverified.
+  const gateWorkspace = Boolean(
+    economicTransactionsGate &&
+    economicTransactionsGate.startPresent &&
+    economicTransactionsGate.sources.length > 0,
+  );
   const authenticated =
     !loginVisible &&
     !sessionExpired &&
-    (dashboardWorkspace || returnWorkspace || headerWorkspace);
+    (dashboardWorkspace || returnWorkspace || headerWorkspace || gateWorkspace);
   const readiness = {
     state: authenticated
       ? "ready"
@@ -517,7 +693,9 @@ function portalProbe(options = {}) {
         ? "dashboard_workspace"
         : returnWorkspace
           ? "return_workspace"
-          : "header_workspace"
+          : headerWorkspace
+            ? "header_workspace"
+            : "economic_transactions_gate"
       : null,
     homeDashboardLink: home,
     declarationMenuCount: declarationMenus.length,
@@ -543,16 +721,49 @@ function portalProbe(options = {}) {
   );
   const kindOfDialog = (el) => {
     const t = text(el).toLowerCase();
+    const dialogControls = controls(el);
+    const commitControlPresent = dialogControls.some((control) =>
+      /^(?:submit|confirm|pay|i agree)$/i.test(text(control)),
+    );
+    const verificationSignature =
+      /\botp\b|captcha|\bpin\b|password|\bpsid\b|\bpayment\b/i.test(t);
+    // Phase 1.5a. The agent opens the "Normal Return (Ind/AOP/COY)" setup
+    // dialog itself, then its own sensitiveControl heuristic below classifies
+    // it as protected and every navigation retry deadlocks on it. Exempt ONLY
+    // a dialog whose visible labels classify as a known, auto-advanceable
+    // setup stage and that carries no verification or commit control. The
+    // heuristic itself stays untouched for every other dialog.
+    const setupDescriptor = {
+      documentPresent: false,
+      prompts: Array.from(el.querySelectorAll('label,legend,[role="heading"]'))
+        .filter(visible)
+        .map(text),
+      actions: dialogControls.map(text),
+      nodeLabels: dialogControls.map(text),
+    };
+    const setupStage = classifySetupStage(setupDescriptor);
+    if (
+      setupStage &&
+      isSafeAutoAdvanceStage(setupStage) &&
+      !verificationSignature &&
+      !commitControlPresent &&
+      // A setup stage never asks for free text; only choices and Continue.
+      !Array.from(el.querySelectorAll("input, textarea"))
+        .filter(visible)
+        .some(
+          (input) =>
+            !/^(?:radio|checkbox|button|submit)$/i.test(
+              input.getAttribute("type") || "text",
+            ),
+        )
+    )
+      return "setup";
     // A real entry/verification field inside a dialog makes dismissal a
     // human decision, even when its name/label is unfamiliar.
     const sensitiveControl = Array.from(
       el.querySelectorAll("input, textarea, select"),
     ).some(visible);
-    if (
-      sensitiveControl ||
-      /\botp\b|captcha|\bpin\b|password|\bpsid\b|\bpayment\b/i.test(t)
-    )
-      return "protected";
+    if (sensitiveControl || verificationSignature) return "protected";
     const imageText = Array.from(el.querySelectorAll("img"))
       .map((img) => img.getAttribute("alt") || "")
       .join(" ")
@@ -579,12 +790,10 @@ function portalProbe(options = {}) {
       knownBanner ||
       (signature.includes("submit your income tax return") &&
         (signature.includes("last date") || signature.includes("tax year")));
-    const commitControl = controls(el).some((control) =>
-      /^(?:submit|confirm|pay|i agree)$/i.test(text(control)),
-    );
-    if (welcome && !commitControl) return "welcome";
+    if (welcome && !commitControlPresent) return "welcome";
     return "unknown";
   };
+  const dialogKinds = dialogs.map(kindOfDialog);
   const blockers = Array.from(
     document.querySelectorAll(
       ".ui-widget-overlay, .modal-backdrop, .cdk-overlay-backdrop.cdk-overlay-backdrop-showing",
@@ -592,7 +801,14 @@ function portalProbe(options = {}) {
   ).filter(
     (el) => visible(el) && getComputedStyle(el).pointerEvents !== "none",
   );
-  const blocking = dialogs.length > 0 || blockers.length > 0;
+  // Phase 1.5a. A recognised setup dialog the agent itself opened is a stage to
+  // advance, not an obstacle to pause on. Every other dialog kind -- protected,
+  // welcome, unknown -- still blocks exactly as before, and any live backdrop
+  // blocks unconditionally.
+  const blocking =
+    dialogKinds.some((kind) => kind !== "setup") || blockers.length > 0;
+  const setupDialogOnly =
+    dialogs.length > 0 && dialogKinds.every((kind) => kind === "setup");
   const isClose = (el) => {
     const label = normalize(
       el.getAttribute("aria-label") || el.getAttribute("title") || text(el),
@@ -2149,13 +2365,15 @@ function portalProbe(options = {}) {
     readiness,
     loginVisible,
     hasBlockingOverlay: blocking,
+    setupDialogOnly,
+    economicTransactionsGate,
     draftTabActive: draftTabs.some(active),
     itDeclarationTabActive: allControls.some(
       (el) => /^IT DECLARATION(?:\s*\(\d+\))?$/i.test(text(el)) && active(el),
     ),
-    dialogs: dialogs.map((el) => ({
+    dialogs: dialogs.map((el, index) => ({
       ...descriptor(el),
-      kind: kindOfDialog(el),
+      kind: dialogKinds[index],
       imageCount: el.querySelectorAll("img").length,
       closeControls: controls(el).filter(isClose).map(descriptor),
     })),
@@ -2248,6 +2466,100 @@ async function probeFrames(
     }
   }
   return { frames: results };
+}
+
+/**
+ * Phase 2a. Bring a named section on screen so the row filler addresses the
+ * grid that actually owns the codes. Uses the same allowlisted, read-only
+ * actions as the section tour ("data-tab", "section-panel", "section-tab") and
+ * confirms the switch by reading back `section.id`. It clicks no amount input,
+ * no Calculate, no Save and no Submit.
+ *
+ * Returns { ok, status, inspection }. A false `ok` is always reported to the
+ * caller rather than filling whatever happens to be showing.
+ */
+async function navigateToSection(
+  windowInstance,
+  { sectionId, taxYear, taxpayerIdentifier = "", hosts = DEFAULT_HOSTS } = {},
+) {
+  const profile = ALL_SECTION_TOUR.find((entry) => entry.id === sectionId);
+  if (!profile) return { ok: false, status: "unsupported_section" };
+  const options = { taxYear, taxpayerIdentifier };
+  const read = () => probeFrames(windowInstance, options, hosts);
+  const current = (snapshot) =>
+    snapshot.frames.find((frame) => frame.document?.present);
+  const runAction = async (action) => {
+    const response = await probeFrames(
+      windowInstance,
+      { ...options, action, sectionId },
+      hosts,
+    );
+    return {
+      response,
+      status: current(response)?.actionResult?.status || "not_found",
+    };
+  };
+
+  let snapshot = await read();
+  let frame = current(snapshot);
+  if (!frame)
+    return { ok: false, status: "document_not_open", inspection: snapshot };
+  if (frame.section?.id === sectionId && !frame.section?.busy)
+    return { ok: true, status: "already_active", inspection: snapshot };
+
+  if (profile.group !== "Top tabs" && frame.section?.dataViewActive === false) {
+    const data = await runAction("data-tab");
+    if (!["clicked", "already_active"].includes(data.status))
+      return {
+        ok: false,
+        status: `data_tab_${data.status}`,
+        inspection: data.response,
+      };
+    await delay(400);
+  }
+
+  const panel = await runAction("section-panel");
+  if (!["clicked", "already_active"].includes(panel.status))
+    return {
+      ok: false,
+      status: `panel_${panel.status}`,
+      inspection: panel.response,
+    };
+
+  // Wait for the panel to finish expanding without re-clicking the toggle.
+  for (let i = 0; i < 16; i++) {
+    snapshot = await read();
+    const entry = current(snapshot)?.section?.navigation?.find(
+      (nav) => nav.id === sectionId,
+    );
+    if (entry?.panelExpanded) break;
+    await delay(300);
+  }
+
+  const tab = await runAction("section-tab");
+  if (!["clicked", "already_active"].includes(tab.status))
+    return { ok: false, status: `tab_${tab.status}`, inspection: tab.response };
+
+  // Require the section to actually be the active one, twice, before trusting
+  // it. A slow Angular swap can briefly report the previous grid.
+  let stable = 0;
+  for (let i = 0; i < 24; i++) {
+    snapshot = await read();
+    const metadata = current(snapshot)?.section;
+    if (
+      metadata?.id === sectionId &&
+      !metadata.busy &&
+      metadata.structurePresent
+    ) {
+      stable += 1;
+      if (stable >= 2)
+        return { ok: true, status: "switched", inspection: snapshot };
+    } else {
+      stable = 0;
+    }
+    await delay(300);
+  }
+  return { ok: false, status: "section_not_settled", inspection: snapshot };
 }
 
 function isAuthenticated(inspection) {
@@ -2827,7 +3139,9 @@ async function inspectNavigation(
       .filter(
         (frame) =>
           frame.authenticated &&
-          !frame.hasBlockingOverlay &&
+          // Phase 1.5a: a frame whose only dialog IS the setup dialog is the
+          // frame we must classify. Excluding it made the stage undiscoverable.
+          (!frame.hasBlockingOverlay || frame.setupDialogOnly) &&
           !frame.document?.present,
       )
       .map((frame) => {
@@ -2871,7 +3185,11 @@ async function inspectNavigation(
       snapshot = snapshot || (await read());
       if (requiresLogin(snapshot))
         return { inspection: snapshot, requiredAction: "session_reconnect" };
-      if (snapshot.frames.some((frame) => frame.hasBlockingOverlay))
+      if (
+        snapshot.frames.some(
+          (frame) => frame.hasBlockingOverlay && !frame.setupDialogOnly,
+        )
+      )
         return { inspection: snapshot, requiredAction: "portal_popup" };
       if (!isAuthenticated(snapshot))
         return {
@@ -2987,14 +3305,23 @@ async function inspectNavigation(
   }
 
   // Bounded retries, never an in-page timer, Escape key, CSS hiding or removal.
+  // A setup-only dialog is deliberately NOT retried here: close-welcome cannot
+  // dismiss it and never could, which is what made "Retry navigation check"
+  // loop forever. It is handled as a stage further down instead.
   for (let i = 0; i < 4; i++) {
-    const blocked = inspection.frames.some((frame) => frame.hasBlockingOverlay);
+    const blocked = inspection.frames.some(
+      (frame) => frame.hasBlockingOverlay && !frame.setupDialogOnly,
+    );
     if (!blocked) break;
     await act("close-welcome");
     await delay(500);
     inspection = await read();
   }
-  if (inspection.frames.some((frame) => frame.hasBlockingOverlay)) {
+  if (
+    inspection.frames.some(
+      (frame) => frame.hasBlockingOverlay && !frame.setupDialogOnly,
+    )
+  ) {
     onStep(
       "portal_popup",
       "A dialog/backdrop remains. No navigation behind it was attempted.",
@@ -3014,20 +3341,66 @@ async function inspectNavigation(
   ) {
     await delay(400);
     inspection = await read();
-    if (inspection.frames.some((frame) => frame.hasBlockingOverlay)) break;
+    if (
+      inspection.frames.some(
+        (frame) => frame.hasBlockingOverlay && !frame.setupDialogOnly,
+      )
+    )
+      break;
   }
   logReadiness(inspection);
   if (requiresLogin(inspection))
     return { inspection, requiredAction: "session_reconnect" };
-  if (inspection.frames.some((frame) => frame.hasBlockingOverlay))
+  if (
+    inspection.frames.some(
+      (frame) => frame.hasBlockingOverlay && !frame.setupDialogOnly,
+    )
+  )
     return { inspection, requiredAction: "portal_popup" };
   if (!isAuthenticated(inspection))
     return { inspection, requiredAction: "portal_readiness_unverified" };
+
+  // Phase 1.5b. The pre-filing gate reached from the blue dashboard tile. It
+  // is read-only to the agent: the taxpayer's income sources and residency are
+  // legal determinations, so we report exactly what is outstanding and stop.
+  const gateFrame = inspection.frames.find(
+    (frame) => frame.economicTransactionsGate?.present,
+  );
+  if (gateFrame) {
+    const gate = describeEconomicTransactionsGate(
+      gateFrame.economicTransactionsGate,
+    );
+    if (!gate.ready) {
+      onStep(
+        "economic_transactions_gate",
+        `IRIS is asking for ${gate.missing.join(" and ")} before "Start Return Filling" is enabled. The agent does not answer this screen.`,
+      );
+      return {
+        inspection,
+        requiredAction: "portal_economic_transactions_gate",
+        economicTransactionsGate: gate,
+      };
+    }
+    onStep(
+      "economic_transactions_gate",
+      `Income sources (${gate.selectedSources.join(", ") || "none listed"}) and residency are answered; "Start Return Filling" is enabled. Click it locally to continue, then Retry.`,
+    );
+    return {
+      inspection,
+      requiredAction: "portal_economic_transactions_gate",
+      economicTransactionsGate: gate,
+    };
+  }
+
   if (openReturn && !inspection.frames.some((f) => f.identityConfigured))
     return { inspection, requiredAction: "portal_identity_required" };
   if (openReturn && inspection.frames.some((f) => f.document?.present))
     return verifyDocument(inspection);
-  if (openReturn && state.newEntryOpened)
+  if (
+    openReturn &&
+    (state.newEntryOpened ||
+      inspection.frames.some((frame) => frame.setupDialogOnly))
+  )
     return advanceNewReturnSetup(inspection);
 
   for (const action of ["draft-tab", "it-declaration-tab"]) {
@@ -3158,15 +3531,21 @@ module.exports = {
   SECTION_TOUR,
   ALL_SECTION_TOUR,
   ALL_SECTION_IDS,
+  WEALTH_SECTION_IDS,
+  INCOME_SECTION_IDS,
   normalizeSetupLabel,
   getExpectedOriginalTaxPeriod,
   classifyNewReturnSetupStage,
   isRecognizedNewReturnSetup,
   isSafeAutoAdvanceNewReturnStage,
   isManualNewReturnStage,
+  describeEconomicTransactionsGate,
+  buildSectionCodeIndex,
+  planSectionFills,
   isAllowedPortalUrl,
   portalProbe,
   probeFrames,
+  navigateToSection,
   isAuthenticated,
   inspectNavigation,
 };

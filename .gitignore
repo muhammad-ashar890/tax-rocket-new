@@ -28,3 +28,14 @@ prisma/*.db
 *.db
 prisma/dev.db
 tsconfig.tsbuildinfo
+
+# never commit the installer
+electron-connect/dist/
+dist/
+*.exe
+*.exe.blockmap
+*.msi
+*.dmg
+*.AppImage
+*.deb
+test-documents.zip

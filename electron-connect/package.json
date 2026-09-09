@@ -24,6 +24,7 @@
     "files": [
       "main.js",
       "iris-navigation.js",
+      "iris-row-filler.js",
       "preload.js",
       "portal-agent.js",
       "renderer.html",

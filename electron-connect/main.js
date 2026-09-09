@@ -41,6 +41,27 @@ let realEntryFallbackAnnounced = false;
 let realPortalMode = false;
 let realPortalLoginUrl = "";
 const irisNavigation = require("./iris-navigation");
+const irisRowFiller = require("./iris-row-filler");
+// Phase 1 — real-portal autofill.
+//
+// Until now every real-IRIS job short-circuited into a navigation-only
+// inspection, so calculation-engine values never reached the live portal. The
+// filler is wired in behind this flag rather than switched on wholesale: a
+// wrong write on a government return is far worse than no write, so operators
+// opt in explicitly and get a dry-run mode first.
+//
+//   TAXROCKET_REAL_AUTOFILL=dry   resolve targets + report, write nothing
+//   TAXROCKET_REAL_AUTOFILL=1     actually fill
+//   (unset)                       previous navigation-only behaviour
+function getRealAutofillMode() {
+  const raw = String(process.env.TAXROCKET_REAL_AUTOFILL || "")
+    .trim()
+    .toLowerCase();
+  if (raw === "dry" || raw === "dryrun" || raw === "dry-run") return "dry";
+  if (raw === "1" || raw === "true" || raw === "on" || raw === "yes")
+    return "live";
+  return "off";
+}
 // Independent controller stamp: a new navigator must not make an OLD main
 // process appear fully updated (the mixed fix10/fix11 rollout hid this).
 const AGENT_BUILD_TAG = "fix16-new-return-setup-20260908";
@@ -3420,7 +3441,10 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
           openReturn: true,
           state: navigationStates.get(stateKey),
           inspectSections: true,
-          sectionIds: irisNavigation.ALL_SECTION_IDS,
+          // Income/tax views only. The 116 Wealth Statement is a separate
+          // document, not a panel in this workflow, and blocking the tour on it
+          // stops every section the autofill actually needs.
+          sectionIds: irisNavigation.INCOME_SECTION_IDS,
           beforeStep: () =>
             ensureNavigationJobActive(job.id, taxpayerIdentifier),
           onSectionCaptured: async (snapshot) => {
@@ -3498,6 +3522,8 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
       "Multiple matching drafts were found. Open the intended draft manually, then Retry. No draft was chosen automatically.",
     portal_draft_list_incomplete:
       "The complete IT Declaration list is not visible (pagination/filter/count mismatch). Show all rows or open the intended draft manually, then Retry. The agent did not assume the draft is missing or open a new-return entry.",
+    portal_economic_transactions_gate:
+      'IRIS is showing the "Summary of Economic Transactions" gate reached from the blue dashboard tile. Tick your income sources and answer the tax-residency question yourself, then click "Start Return Filling" locally and Retry. The agent will not answer these for you: residency under ITO sections 82-84 and the choice of income sources are your declarations, and they decide which schedules IRIS opens.',
     portal_new_return_setup: `No matching draft was found in the complete displayed list. The new Original TY2026+ return menu is open. Select the intended 114(1) form and TY${taxYear} period locally, handle any required setup questions, then Retry. Do not submit the return. No Create/Save/Submit control was clicked by the agent.`,
     portal_sections_inspected:
       "The seven requested Data sections plus Payment and Attachment were inspected. Each grid has its own headers and row context in the export. This is NOT a filed return: no amounts, uploads or payments were made and Save/Submit were not clicked.",
@@ -3545,11 +3571,30 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
     selectorBundle: getSelectorBundleSignal(jobContext),
     domEvidence: outcome.inspection,
     captures: [],
+    ...(outcome.economicTransactionsGate
+      ? { economicTransactionsGate: outcome.economicTransactionsGate }
+      : {}),
   };
+  // portal_sections_inspected is a successful completion of the tour, not a
+  // request for the user to do something. Reporting it as paused meant autofill
+  // was unreachable even when navigation had fully succeeded: both filing flows
+  // return early on `navigation?.paused`. Every other requiredAction is still a
+  // genuine checkpoint. Save/Submit remain untouched either way.
+  const navigationComplete =
+    outcome.requiredAction === "portal_sections_inspected";
   onStep(
-    "inspection_pause",
+    navigationComplete ? "inspection_complete" : "inspection_pause",
     `Navigation checkpoint: ${outcome.requiredAction}. Local structure file: ${inspectionPath}`,
   );
+  if (navigationComplete) {
+    return {
+      paused: false,
+      pauseAction: outcome.requiredAction,
+      pauseMessage,
+      result,
+      executionLog,
+    };
+  }
   await updateLocalJobStatus(job.id, "awaiting_user_action", {
     pauseAction: outcome.requiredAction,
     pauseMessage,
@@ -3565,9 +3610,189 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
   };
 }
 
+/**
+ * Phase 1: fill packet values into the live IRIS 2.0 return.
+ *
+ * Addresses rows by their IRIS system code (the row container's `id`) and the
+ * column by matching the rendered header text, because the amount inputs carry
+ * no id/name of their own — see electron-connect/iris-row-filler.js.
+ *
+ * Runs only for the section currently on screen; codes belonging to other
+ * sections come back as `row_not_found`, which is expected and reported rather
+ * than treated as failure. Section-by-section navigation is Phase 2 work.
+ */
+async function runRealIrisAutofill(jobContext, job, mode) {
+  const windowInstance = await ensureWorkerWindow();
+  const packet = jobContext.filingPacket || {};
+  const snapshot = packet.snapshot || jobContext.snapshot || {};
+  const portalFieldMap = Array.isArray(snapshot.portalFieldMap)
+    ? snapshot.portalFieldMap
+    : [];
+
+  const coded = portalFieldMap.filter((f) => f && f.irisCode);
+  const executionLog = [];
+  activeJobExecutionLog = executionLog;
+
+  const onStep = (step, detail) => {
+    executionLog.push({ step, label: step.replace(/_/g, " "), detail });
+    pushStatus("progress", detail);
+  };
+
+  onStep(
+    "real_autofill_start",
+    `Real-portal autofill (${mode === "dry" ? "DRY RUN — no writes" : "LIVE"}): ` +
+      `${coded.length} IRIS-coded fields of ${portalFieldMap.length} in packet.`,
+  );
+
+  if (!coded.length) {
+    onStep(
+      "real_autofill_skipped",
+      "The approved packet contains no IRIS-coded fields, so there is nothing to fill.",
+    );
+    return { paused: false, executionLog, result: { filled: 0, results: [] } };
+  }
+
+  // Phase 2a. The section tour leaves the portal on its last view (Attachment,
+  // which has no data rows), and the filler only sees the section on screen.
+  // Walk the sections that actually own these codes, filling each in place.
+  const sectionTour = lastSectionTour || null;
+  const plan = irisNavigation.planSectionFills(coded, sectionTour);
+  const taxYear =
+    Number(packet.taxYear || snapshot.filing?.taxYear) || undefined;
+  const taxpayerIdentifier = launchState.accountReference || "";
+
+  let results = [];
+  if (!plan.groups.length) {
+    onStep(
+      "real_autofill_no_plan",
+      "No packet code was seen in the captured section tour, so no section could be targeted. Nothing was filled.",
+    );
+  }
+  for (const group of plan.groups) {
+    const moved = await irisNavigation.navigateToSection(windowInstance, {
+      sectionId: group.sectionId,
+      taxYear,
+      taxpayerIdentifier,
+    });
+    if (!moved.ok) {
+      onStep(
+        "real_autofill_section_skipped",
+        `${group.sectionId}: could not be opened (${moved.status}). ${group.fields.length} field(s) were left untouched rather than filled into the wrong grid.`,
+      );
+      results = results.concat(
+        group.fields.map((field) => ({
+          ...field,
+          status: irisRowFiller.FILL_STATUS.ROW_NOT_FOUND,
+          sectionId: group.sectionId,
+          sectionStatus: moved.status,
+        })),
+      );
+      continue;
+    }
+    onStep(
+      "real_autofill_section",
+      `${group.sectionId}: ${moved.status}; filling ${group.fields.length} field(s).`,
+    );
+    const outcome = await irisRowFiller.fillIrisRows(
+      windowInstance,
+      group.fields,
+      { dryRun: mode === "dry" },
+    );
+    results = results.concat(
+      outcome.results.map((entry) => ({
+        ...entry,
+        sectionId: group.sectionId,
+      })),
+    );
+  }
+  for (const field of plan.unlocated) {
+    onStep(
+      "real_autofill_unlocated",
+      `${field.irisCode} "${field.label || ""}" was not seen in any captured section, so no grid could be targeted.`,
+    );
+    results.push({
+      ...field,
+      status: irisRowFiller.FILL_STATUS.ROW_NOT_FOUND,
+      sectionId: null,
+    });
+  }
+  const summary = irisRowFiller.summarise(results);
+
+  onStep("real_autofill_result", irisRowFiller.describeFillSummary(summary));
+
+  // Surface each refusal individually — a value that silently did not land is
+  // exactly the failure mode this phase exists to prevent.
+  for (const r of results) {
+    if (r.status === irisRowFiller.FILL_STATUS.FILLED) continue;
+    onStep(
+      "real_autofill_skip",
+      `${r.irisCode} "${r.label || r.rowDescription || ""}" -> ${r.status}` +
+        (r.requestedColumn ? ` (column: ${r.requestedColumn})` : ""),
+    );
+  }
+
+  const captures = [
+    await captureWindowScreenshot(windowInstance, "real_autofill"),
+  ];
+
+  return {
+    paused: false,
+    executionLog,
+    result: {
+      mode,
+      summary,
+      results,
+      captures,
+      message: irisRowFiller.describeFillSummary(summary),
+    },
+  };
+}
+
+/**
+ * A navigation check that completed the section tour is no longer marked paused,
+ * so autofill can run. When autofill is switched off the job has nonetheless
+ * finished its work, and must still be recorded as awaiting the user rather
+ * than left silently running.
+ */
+async function finishNavigationOnly(navigation, job) {
+  if (!navigation || navigation.paused !== false || !navigation.pauseAction)
+    return navigation;
+  await updateLocalJobStatus(job.id, "awaiting_user_action", {
+    pauseAction: navigation.pauseAction,
+    pauseMessage: navigation.pauseMessage,
+    result: navigation.result,
+    executionLog: navigation.executionLog,
+  });
+  return { ...navigation, paused: true };
+}
+
 async function runLocalTaxDryRunFlow(jobContext) {
   if (realPortalMode) {
-    return runLocalIrisNavigationCheck(jobContext, jobContext.job);
+    const autofillMode = getRealAutofillMode();
+    // Navigation check first: it drives the taxpayer to the right return and
+    // is where all the login/route/pause handling lives. Only once it reports
+    // an un-paused, ready form does filling make sense.
+    const navigation = await runLocalIrisNavigationCheck(
+      jobContext,
+      jobContext.job,
+    );
+    if (autofillMode === "off" || navigation?.paused) {
+      return await finishNavigationOnly(navigation, jobContext.job);
+    }
+    const autofill = await runRealIrisAutofill(
+      jobContext,
+      jobContext.job,
+      autofillMode,
+    );
+    return {
+      ...navigation,
+      paused: false,
+      executionLog: [
+        ...(navigation?.executionLog || []),
+        ...(autofill.executionLog || []),
+      ],
+      result: { ...(navigation?.result || {}), autofill: autofill.result },
+    };
   }
   const windowInstance = await ensureWorkerWindow();
   const config = jobContext.taxAutomationConfig || {};
@@ -3928,7 +4153,23 @@ async function pauseAssistedPilot(job, windowInstance, input) {
 
 async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   if (realPortalMode) {
-    return runLocalIrisNavigationCheck(jobContext, job);
+    const autofillMode = getRealAutofillMode();
+    const navigation = await runLocalIrisNavigationCheck(jobContext, job);
+    if (autofillMode === "off" || navigation?.paused) {
+      return await finishNavigationOnly(navigation, job);
+    }
+    // Assisted filing still stops before Save/Submit — this only populates the
+    // data grid for the supervising user to review.
+    const autofill = await runRealIrisAutofill(jobContext, job, autofillMode);
+    return {
+      ...navigation,
+      paused: false,
+      executionLog: [
+        ...(navigation?.executionLog || []),
+        ...(autofill.executionLog || []),
+      ],
+      result: { ...(navigation?.result || {}), autofill: autofill.result },
+    };
   }
   const windowInstance = await ensureWorkerWindow();
   const config = jobContext.taxAutomationConfig || {};

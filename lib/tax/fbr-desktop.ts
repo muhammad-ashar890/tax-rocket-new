@@ -110,6 +110,7 @@ export const JOB_STATUSES = {
 export const PAUSE_ACTIONS = {
   PORTAL_INSPECTION: "portal_inspection",
   PORTAL_POPUP: "portal_popup",
+  PORTAL_ECONOMIC_TRANSACTIONS_GATE: "portal_economic_transactions_gate",
   SESSION_RECONNECT: "session_reconnect",
   SELECTOR_BUNDLE_UPDATE: "selector_bundle_update",
   PASSWORD_RESET: "password_reset",
