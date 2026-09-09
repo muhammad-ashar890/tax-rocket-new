@@ -2484,7 +2484,9 @@ async function navigateToSection(
 ) {
   const profile = ALL_SECTION_TOUR.find((entry) => entry.id === sectionId);
   if (!profile) return { ok: false, status: "unsupported_section" };
-  const options = { taxYear, taxpayerIdentifier };
+  // openReturn is what unlocks the navigation action allowlist in portalProbe.
+  // Without it every section click returns "navigation_not_enabled".
+  const options = { taxYear, taxpayerIdentifier, openReturn: true };
   const read = () => probeFrames(windowInstance, options, hosts);
   const current = (snapshot) =>
     snapshot.frames.find((frame) => frame.document?.present);

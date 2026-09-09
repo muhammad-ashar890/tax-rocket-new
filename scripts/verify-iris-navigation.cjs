@@ -1162,3 +1162,50 @@ test("Phase 2a: a section that will not open leaves its fields untouched", async
   assert.equal(outcome.result.results[0].status, "row_not_found");
   assert.equal(outcome.result.results[0].sectionStatus, "tab_not_found");
 });
+
+test("Phase 2a: navigateToSection unlocks the navigation allowlist (openReturn)", async () => {
+  // Dry-run 2026-09-09 #4: every section click returned
+  // "data_tab_navigation_not_enabled" because navigateToSection probed without
+  // openReturn, and portalProbe gates the whole navigation action allowlist on
+  // it. The plan was correct; the clicks were refused before they were tried.
+  const seen = [];
+  const fakeWindow = {
+    isDestroyed: () => false,
+    webContents: {
+      getURL: () => "https://iris.fbr.gov.pk/nitr/workflow",
+      executeJavaScript: async (source) => {
+        const options = JSON.parse(
+          source.slice(source.lastIndexOf("})(") + 3, -1),
+        );
+        seen.push(options);
+        return {
+          document: { present: true },
+          section: { id: "attachment", dataViewActive: false, navigation: [] },
+          actionResult: {
+            action: options.action || "inspect",
+            status: "read_only",
+          },
+        };
+      },
+    },
+  };
+  fakeWindow.webContents.mainFrame = {
+    url: "https://iris.fbr.gov.pk/nitr/workflow",
+    executeJavaScript: fakeWindow.webContents.executeJavaScript,
+  };
+  fakeWindow.webContents.mainFrame.framesInSubtree = [
+    fakeWindow.webContents.mainFrame,
+  ];
+
+  await navigation.navigateToSection(fakeWindow, {
+    sectionId: "salary",
+    taxYear: 2026,
+  });
+  assert.ok(seen.length > 0, "the section switch must actually probe the page");
+  for (const options of seen)
+    assert.equal(
+      options.openReturn,
+      true,
+      "every probe must carry openReturn or portalProbe refuses the click",
+    );
+});
